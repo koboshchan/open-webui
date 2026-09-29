@@ -6,7 +6,10 @@
 		getModelAnalytics,
 		getUserAnalytics,
 		getDailyStats,
-		getTokenUsage
+		getTokenUsage,
+		getAPICallCollection,
+		setAPICallCollection,
+		getAPICallSummary
 	} from '$lib/apis/analytics';
 	import { getGroups } from '$lib/apis/groups';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -83,6 +86,9 @@
 		{ input_tokens: number; output_tokens: number; total_tokens: number }
 	> = {};
 	let totalTokens = { input: 0, output: 0, total: 0 };
+	let apiCallCollectionEnabled = false;
+	let apiCallSummary = { total_calls: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+	let apiCallCollectionSaving = false;
 
 	let loading = true;
 
@@ -119,12 +125,13 @@
 		try {
 			const { start, end } = getDateRange(selectedPeriod);
 			const granularity = selectedPeriod === '24h' ? 'hourly' : 'daily';
-			const [summaryRes, modelsRes, usersRes, dailyRes, tokensRes] = await Promise.all([
+			const [summaryRes, modelsRes, usersRes, dailyRes, tokensRes, apiCallsRes] = await Promise.all([
 				getSummary(localStorage.token, start, end, selectedGroupId),
 				getModelAnalytics(localStorage.token, start, end, selectedGroupId),
 				getUserAnalytics(localStorage.token, start, end, 50, selectedGroupId),
 				getDailyStats(localStorage.token, start, end, granularity, selectedGroupId),
-				getTokenUsage(localStorage.token, start, end, selectedGroupId)
+				getTokenUsage(localStorage.token, start, end, selectedGroupId),
+				apiCallCollectionEnabled ? getAPICallSummary(localStorage.token, start, end) : Promise.resolve(null)
 			]);
 
 			summary = summaryRes ?? summary;
@@ -137,6 +144,7 @@
 
 			userStats = usersRes?.users ?? [];
 			dailyStats = dailyRes?.data ?? [];
+			if (apiCallsRes) apiCallSummary = apiCallsRes;
 
 			// Process token data
 			if (tokensRes) {
@@ -160,6 +168,17 @@
 		loading = false;
 	};
 
+	const toggleAPICallCollection = async () => {
+		apiCallCollectionSaving = true;
+		try {
+			const result = await setAPICallCollection(localStorage.token, !apiCallCollectionEnabled);
+			apiCallCollectionEnabled = result.enabled;
+		} catch (err) {
+			console.error('Could not update API call collection:', err);
+		}
+		apiCallCollectionSaving = false;
+	};
+
 	// Reload when the period, group, or custom range changes.
 	// In custom mode, wait until both dates are set to avoid a half-specified query.
 	$: if (selectedPeriod === 'custom' && !(customStart && customEnd)) {
@@ -169,6 +188,7 @@
 		customStart;
 		customEnd;
 		selectedGroupId;
+		apiCallCollectionEnabled;
 		loadDashboard();
 	}
 
@@ -179,6 +199,12 @@
 			groups = res ?? [];
 		} catch (e) {
 			console.error('Failed to load groups:', e);
+		}
+		try {
+			const res = await getAPICallCollection(localStorage.token);
+			apiCallCollectionEnabled = Boolean(res?.enabled);
+		} catch (e) {
+			console.error('Failed to load API call collection setting:', e);
 		}
 	});
 
@@ -271,6 +297,15 @@
 				<option value={period.value}>{period.label}</option>
 			{/each}
 		</select>
+		<button
+			type="button"
+			on:click={toggleAPICallCollection}
+			disabled={apiCallCollectionSaving}
+			aria-pressed={apiCallCollectionEnabled}
+			class="rounded px-2 py-1 text-xs border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+		>
+			{$i18n.t('API call collection')}: {apiCallCollectionEnabled ? $i18n.t('On') : $i18n.t('Off')}
+		</button>
 	</div>
 </div>
 
@@ -310,6 +345,25 @@
 			{$i18n.t('users')}</span
 		>
 	</div>
+	{#if apiCallCollectionEnabled}
+		<div class="flex flex-wrap gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
+			<span
+				><span class="text-gray-900 dark:text-gray-300"
+					>{formatNumber(apiCallSummary.total_calls)}</span
+				> {$i18n.t('API calls')}</span
+			>
+			<span
+				><span class="text-gray-900 dark:text-gray-300"
+					>{formatNumber(apiCallSummary.input_tokens)}</span
+				> {$i18n.t('Input tokens')}</span
+			>
+			<span
+				><span class="text-gray-900 dark:text-gray-300"
+					>{formatNumber(apiCallSummary.output_tokens)}</span
+				> {$i18n.t('Output tokens')}</span
+			>
+		</div>
+	{/if}
 
 	<!-- Daily usage chart -->
 	{#if dailyStats.length > 1}

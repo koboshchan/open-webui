@@ -1,5 +1,42 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+export const getAPICallCollection = async (token: string = '') => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/api-calls/collection`, {
+		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
+export const setAPICallCollection = async (token: string = '', enabled: boolean) => {
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/api-calls/collection`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify({ enabled })
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
+export const getAPICallSummary = async (
+	token: string = '',
+	startDate: number | null = null,
+	endDate: number | null = null
+) => {
+	const searchParams = new URLSearchParams();
+	if (startDate) searchParams.append('start_date', startDate.toString());
+	if (endDate) searchParams.append('end_date', endDate.toString());
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/api-calls/summary?${searchParams}`, {
+		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
+	});
+	if (!res.ok) throw await res.json();
+	return res.json();
+};
+
 export const getModelAnalytics = async (
 	token: string = '',
 	startDate: number | null = null,

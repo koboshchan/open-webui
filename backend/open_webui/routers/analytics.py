@@ -6,6 +6,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from open_webui.internal.db import get_async_session
 from open_webui.models.chat_messages import ChatMessageModel, ChatMessages
+from open_webui.models.api_calls import APICalls
+from open_webui.models.config import Config
 from open_webui.models.chats import Chats
 from open_webui.models.feedbacks import Feedbacks
 from open_webui.models.groups import Groups
@@ -18,6 +20,32 @@ log = logging.getLogger(__name__)
 
 
 router = APIRouter()
+API_CALL_COLLECTION_CONFIG = 'analytics.api_call_collection'
+
+
+class APICallCollectionForm(BaseModel):
+    enabled: bool
+
+
+@router.get('/api-calls/collection')
+async def get_api_call_collection(user=Depends(get_admin_user)):
+    return {'enabled': bool(await Config.get(API_CALL_COLLECTION_CONFIG, False))}
+
+
+@router.post('/api-calls/collection')
+async def set_api_call_collection(form_data: APICallCollectionForm, user=Depends(get_admin_user)):
+    await Config.upsert({API_CALL_COLLECTION_CONFIG: form_data.enabled})
+    return {'enabled': form_data.enabled}
+
+
+@router.get('/api-calls/summary')
+async def get_api_call_summary(
+    start_date: Optional[int] = Query(None),
+    end_date: Optional[int] = Query(None),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await APICalls.summary(start_date=start_date, end_date=end_date, db=db)
 
 
 ####################

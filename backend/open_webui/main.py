@@ -214,6 +214,7 @@ from open_webui.utils.access_control.folders import has_folder_write_access
 from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.asgi_middleware import AppHTTPMiddleware
 from open_webui.utils.audit import AuditLevel, AuditLoggingMiddleware
+from open_webui.utils.api_call_analytics import APICallAnalyticsMiddleware
 from open_webui.utils.auth import (
     create_admin_user,
     decode_token,
@@ -794,6 +795,7 @@ app.state.speech_speaker_embeddings_dataset = None
 app.state.MODELS = MODELS
 
 # Add the middleware to the app
+app.add_middleware(APICallAnalyticsMiddleware)
 try:
     audit_level = AuditLevel(AUDIT_LOG_LEVEL)
 except ValueError as e:
