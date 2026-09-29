@@ -30,10 +30,9 @@ export type APICallDashboard = {
 		total_tokens: number;
 		total_users: number;
 	};
-	timeline: { date: string; models: Record<string, number> }[];
-	routes: {
-		method: string;
-		path: string;
+	timeline: { date: string; models: Record<string, number>; token_models: Record<string, number> }[];
+	models: {
+		model_id: string | null;
 		count: number;
 		input_tokens: number;
 		output_tokens: number;

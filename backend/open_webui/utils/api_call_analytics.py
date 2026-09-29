@@ -1,4 +1,5 @@
 import json
+import re
 import time
 
 from open_webui.models.api_calls import APICalls
@@ -18,6 +19,7 @@ class APICallAnalyticsMiddleware:
     CONFIG_KEY = 'analytics.api_call_collection'
     CACHE_SECONDS = 1
     MAX_CAPTURE_BYTES = 2_000_000
+    MODEL_PATH = re.compile(r'/(?:chat/completions|completions|responses|messages|embeddings|embed|generate|chat)(?:/\d+)?$')
 
     def __init__(self, app):
         self.app = app
@@ -91,6 +93,36 @@ class APICallAnalyticsMiddleware:
         except (TypeError, ValueError):
             return 0, 0
 
+    @staticmethod
+    def _read_model(body: bytearray) -> str | None:
+        if not body:
+            return None
+
+        def model_from_payload(payload) -> str | None:
+            if isinstance(payload, dict):
+                model = payload.get('model')
+                if isinstance(model, str) and model.strip():
+                    return model.strip()[:512]
+            return None
+
+        try:
+            text = body.decode('utf-8')
+            try:
+                return model_from_payload(json.loads(text))
+            except (ValueError, TypeError):
+                for line in text.splitlines():
+                    if not line.startswith('data:'):
+                        continue
+                    try:
+                        model = model_from_payload(json.loads(line.removeprefix('data:').strip()))
+                    except (ValueError, TypeError):
+                        continue
+                    if model:
+                        return model
+        except UnicodeDecodeError:
+            pass
+        return None
+
     async def __call__(self, scope, receive, send):
         path = scope.get('path', '')
         if (
@@ -102,7 +134,22 @@ class APICallAnalyticsMiddleware:
             return await self.app(scope, receive, send)
 
         response_body = bytearray()
+        request_body = bytearray()
+        capture_model = scope.get('method') == 'POST' and bool(self.MODEL_PATH.search(path))
+        request_too_large = False
         status_code = 500
+
+        async def receive_capture():
+            nonlocal request_too_large
+            message = await receive()
+            if message['type'] == 'http.request' and not request_too_large:
+                chunk = message.get('body', b'')
+                if len(request_body) + len(chunk) <= self.MAX_CAPTURE_BYTES:
+                    request_body.extend(chunk)
+                else:
+                    request_body.clear()
+                    request_too_large = True
+            return message
 
         async def send_capture(message):
             nonlocal status_code
@@ -115,9 +162,13 @@ class APICallAnalyticsMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, receive, send_capture)
+            await self.app(scope, receive_capture if capture_model else receive, send_capture)
         finally:
             input_tokens, output_tokens = self._read_usage(response_body)
+            model_id = (
+                self._read_model(request_body) or self._read_model(response_body)
+                if capture_model else None
+            )
             authenticated_user = (scope.get('state') or {}).get('user')
             try:
                 await APICalls.record(
@@ -125,6 +176,7 @@ class APICallAnalyticsMiddleware:
                     path=getattr(scope.get('route'), 'path', None) or 'unmatched',
                     status_code=status_code,
                     user_id=getattr(authenticated_user, 'id', None),
+                    model_id=model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                 )
