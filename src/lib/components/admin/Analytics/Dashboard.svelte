@@ -9,7 +9,8 @@
 		getTokenUsage,
 		getAPICallCollection,
 		setAPICallCollection,
-		getAPICallSummary
+		getAPICallDashboard,
+		type APICallDashboard
 	} from '$lib/apis/analytics';
 	import { getGroups } from '$lib/apis/groups';
 	import Spinner from '$lib/components/common/Spinner.svelte';
@@ -42,6 +43,13 @@
 		{ value: 'all', label: $i18n.t('All time') },
 		{ value: 'custom', label: $i18n.t('Custom range') }
 	];
+	const chartPeriods: Record<string, 'hour' | 'week' | 'month' | 'year' | 'all'> = {
+		'24h': 'hour',
+		'7d': 'week',
+		'30d': 'month',
+		'90d': 'year',
+		all: 'all'
+	};
 
 	// User group filter
 	let groups: Array<{ id: string; name: string }> = [];
@@ -60,9 +68,11 @@
 			case '90d':
 				return { start: now - 90 * day, end: now };
 			case 'custom': {
-				// Parse YYYY-MM-DD inputs; end date is inclusive (covers the full day)
-				const start = customStart ? Math.floor(new Date(customStart).getTime() / 1000) : null;
-				const end = customEnd ? Math.floor(new Date(customEnd).getTime() / 1000) + day - 1 : null;
+				// Date inputs are local calendar days, including days with a DST change.
+				const start = customStart ? Math.floor(new Date(`${customStart}T00:00:00`).getTime() / 1000) : null;
+				const endDay = customEnd ? new Date(`${customEnd}T00:00:00`) : null;
+				if (endDay) endDay.setDate(endDay.getDate() + 1);
+				const end = endDay ? Math.floor(endDay.getTime() / 1000) - 1 : null;
 				return { start, end };
 			}
 			default:
@@ -87,8 +97,17 @@
 	> = {};
 	let totalTokens = { input: 0, output: 0, total: 0 };
 	let apiCallCollectionEnabled = false;
-	let apiCallSummary = { total_calls: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+	let collectionLoaded = false;
+	let collectionError = false;
+	let apiDashboard: APICallDashboard = {
+		summary: { total_calls: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, total_users: 0 },
+		timeline: [],
+		routes: [],
+		users: []
+	};
 	let apiCallCollectionSaving = false;
+	let loadVersion = 0;
+	let dashboardError = false;
 
 	let loading = true;
 
@@ -101,6 +120,26 @@
 	let modelDirection: 'asc' | 'desc' = 'desc';
 	let userOrderBy = 'count';
 	let userDirection: 'asc' | 'desc' = 'desc';
+	let apiUserOrderBy: 'name' | 'count' | 'input_tokens' | 'output_tokens' = 'count';
+	let apiUserDirection: 'asc' | 'desc' = 'desc';
+	let routeOrderBy: 'path' | 'count' | 'input_tokens' | 'output_tokens' = 'count';
+	let routeDirection: 'asc' | 'desc' = 'desc';
+
+	const toggleApiUserSort = (key: typeof apiUserOrderBy) => {
+		if (apiUserOrderBy === key) apiUserDirection = apiUserDirection === 'asc' ? 'desc' : 'asc';
+		else {
+			apiUserOrderBy = key;
+			apiUserDirection = key === 'name' ? 'asc' : 'desc';
+		}
+	};
+
+	const toggleRouteSort = (key: typeof routeOrderBy) => {
+		if (routeOrderBy === key) routeDirection = routeDirection === 'asc' ? 'desc' : 'asc';
+		else {
+			routeOrderBy = key;
+			routeDirection = key === 'path' ? 'asc' : 'desc';
+		}
+	};
 
 	const toggleModelSort = (key: string) => {
 		if (modelOrderBy === key) {
@@ -121,18 +160,32 @@
 	};
 
 	const loadDashboard = async () => {
+		const version = ++loadVersion;
 		loading = true;
+		dashboardError = false;
 		try {
 			const { start, end } = getDateRange(selectedPeriod);
 			const granularity = selectedPeriod === '24h' ? 'hourly' : 'daily';
-			const [summaryRes, modelsRes, usersRes, dailyRes, tokensRes, apiCallsRes] = await Promise.all([
+			if (apiCallCollectionEnabled) {
+				const result = await getAPICallDashboard(
+					localStorage.token,
+					start,
+					end,
+					selectedGroupId,
+					granularity,
+					Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+				);
+				if (version === loadVersion) apiDashboard = result;
+				return;
+			}
+			const [summaryRes, modelsRes, usersRes, dailyRes, tokensRes] = await Promise.all([
 				getSummary(localStorage.token, start, end, selectedGroupId),
 				getModelAnalytics(localStorage.token, start, end, selectedGroupId),
 				getUserAnalytics(localStorage.token, start, end, 50, selectedGroupId),
 				getDailyStats(localStorage.token, start, end, granularity, selectedGroupId),
-				getTokenUsage(localStorage.token, start, end, selectedGroupId),
-				apiCallCollectionEnabled ? getAPICallSummary(localStorage.token, start, end) : Promise.resolve(null)
+				getTokenUsage(localStorage.token, start, end, selectedGroupId)
 			]);
+			if (version !== loadVersion) return;
 
 			summary = summaryRes ?? summary;
 
@@ -144,7 +197,6 @@
 
 			userStats = usersRes?.users ?? [];
 			dailyStats = dailyRes?.data ?? [];
-			if (apiCallsRes) apiCallSummary = apiCallsRes;
 
 			// Process token data
 			if (tokensRes) {
@@ -164,8 +216,10 @@
 			}
 		} catch (err) {
 			console.error('Dashboard load failed:', err);
+			if (version === loadVersion) dashboardError = true;
+		} finally {
+			if (version === loadVersion) loading = false;
 		}
-		loading = false;
 	};
 
 	const toggleAPICallCollection = async () => {
@@ -181,9 +235,9 @@
 
 	// Reload when the period, group, or custom range changes.
 	// In custom mode, wait until both dates are set to avoid a half-specified query.
-	$: if (selectedPeriod === 'custom' && !(customStart && customEnd)) {
+	$: if (collectionLoaded && selectedPeriod === 'custom' && !(customStart && customEnd)) {
 		loading = false;
-	} else if (selectedPeriod) {
+	} else if (collectionLoaded && !collectionError && selectedPeriod) {
 		// reference customStart/customEnd so this block reruns when they change
 		customStart;
 		customEnd;
@@ -193,19 +247,42 @@
 	}
 
 	onMount(async () => {
-		// Load groups for filter
-		try {
-			const res = await getGroups(localStorage.token);
-			groups = res ?? [];
-		} catch (e) {
-			console.error('Failed to load groups:', e);
+		const [groupsResult, collectionResult] = await Promise.allSettled([
+			getGroups(localStorage.token),
+			getAPICallCollection(localStorage.token)
+		]);
+		if (groupsResult.status === 'fulfilled') groups = groupsResult.value ?? [];
+		else console.error('Failed to load groups:', groupsResult.reason);
+		if (collectionResult.status === 'fulfilled') {
+			apiCallCollectionEnabled = Boolean(collectionResult.value?.enabled);
+		} else {
+			collectionError = true;
+			console.error('Failed to load API call collection setting:', collectionResult.reason);
 		}
-		try {
-			const res = await getAPICallCollection(localStorage.token);
-			apiCallCollectionEnabled = Boolean(res?.enabled);
-		} catch (e) {
-			console.error('Failed to load API call collection setting:', e);
+		collectionLoaded = true;
+	});
+
+	$: sortedRoutes = [...apiDashboard.routes].sort((a, b) => {
+		const compare = routeOrderBy === 'path'
+			? `${a.method} ${a.path}`.localeCompare(`${b.method} ${b.path}`)
+			: a[routeOrderBy] - b[routeOrderBy];
+		return routeDirection === 'asc' ? compare : -compare;
+	});
+
+	$: sortedApiUsers = [...apiDashboard.users].sort((a, b) => {
+		let compare: number;
+		if (apiUserOrderBy === 'name') {
+			compare = (a.name || a.email || a.user_id || '').localeCompare(
+				b.name || b.email || b.user_id || ''
+			);
+		} else if (apiUserOrderBy === 'input_tokens') {
+			compare = a.input_tokens - b.input_tokens;
+		} else if (apiUserOrderBy === 'output_tokens') {
+			compare = a.output_tokens - b.output_tokens;
+		} else {
+			compare = a.count - b.count;
 		}
+		return apiUserDirection === 'asc' ? compare : -compare;
 	});
 
 	$: sortedModels = [...modelStats].sort((a, b) => {
@@ -300,7 +377,7 @@
 		<button
 			type="button"
 			on:click={toggleAPICallCollection}
-			disabled={apiCallCollectionSaving}
+			disabled={apiCallCollectionSaving || !collectionLoaded || collectionError}
 			aria-pressed={apiCallCollectionEnabled}
 			class="rounded px-2 py-1 text-xs border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
 		>
@@ -309,6 +386,99 @@
 	</div>
 </div>
 
+{#if collectionError}
+	<div class="text-sm text-red-500 py-8 text-center">{$i18n.t('Failed to load analytics settings')}</div>
+{:else if !collectionLoaded || loading}
+	<div class="my-10 flex justify-center"><Spinner className="size-5" /></div>
+{:else if dashboardError}
+	<div class="text-sm text-red-500 py-8 text-center">{$i18n.t('Failed to load analytics data')}</div>
+{:else if selectedPeriod === 'custom' && !(customStart && customEnd)}
+	<div class="text-sm text-gray-400 py-8 text-center">{$i18n.t('Select a start and end date')}</div>
+{:else if apiCallCollectionEnabled}
+	<div class="flex flex-wrap gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
+		<span><span class="text-gray-900 dark:text-gray-300">{apiDashboard.summary.total_calls.toLocaleString()}</span> {$i18n.t('API calls')}</span>
+		<span><span class="text-gray-900 dark:text-gray-300">{formatNumber(apiDashboard.summary.input_tokens)}</span> {$i18n.t('Input tokens')}</span>
+		<span><span class="text-gray-900 dark:text-gray-300">{formatNumber(apiDashboard.summary.output_tokens)}</span> {$i18n.t('Output tokens')}</span>
+		<span><span class="text-gray-900 dark:text-gray-300">{apiDashboard.summary.total_users.toLocaleString()}</span> {$i18n.t('users')}</span>
+	</div>
+
+	<div class="mb-4">
+		<div class="text-xs font-normal text-gray-600 dark:text-gray-400 mb-2 px-0.5">
+			{selectedPeriod === '24h' ? $i18n.t('Hourly API calls') : $i18n.t('Daily API calls')}
+		</div>
+		{#if apiDashboard.timeline.length > 1}
+			<ChartLine
+				data={apiDashboard.timeline}
+				models={['API calls']}
+				colors={['#3b82f6']}
+				height={200}
+				period={chartPeriods[selectedPeriod] || 'week'}
+			/>
+		{:else}
+			<div class="py-10 text-center text-xs text-gray-400">{$i18n.t('No data')}</div>
+		{/if}
+	</div>
+
+	<div class="grid md:grid-cols-2 gap-4">
+		<div>
+			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">{$i18n.t('API Routes')}</div>
+			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
+				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400 table-auto">
+					<thead class="text-xs text-gray-800 uppercase dark:text-gray-200">
+						<tr class="border-b-[1.5px] border-gray-50 dark:border-gray-850/30">
+							<th scope="col" class="px-2.5 py-2 cursor-pointer" on:click={() => toggleRouteSort('path')}>{$i18n.t('Route')}</th>
+							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleRouteSort('count')}>{$i18n.t('Calls')}</th>
+							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleRouteSort('input_tokens')}>{$i18n.t('Input tokens')}</th>
+							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleRouteSort('output_tokens')}>{$i18n.t('Output tokens')}</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each sortedRoutes as route (`${route.method} ${route.path}`)}
+							<tr class="dark:border-gray-850">
+								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white"><span class="text-gray-400">{route.method}</span> {route.path}</td>
+								<td class="px-2.5 py-1 text-right">{route.count.toLocaleString()}</td>
+								<td class="px-2.5 py-1 text-right">{formatNumber(route.input_tokens)}</td>
+								<td class="px-2.5 py-1 text-right">{formatNumber(route.output_tokens)}</td>
+							</tr>
+						{:else}
+							<tr><td colspan="4" class="px-3 py-2 text-center text-gray-400">{$i18n.t('No data')}</td></tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		</div>
+		<div>
+			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">{$i18n.t('User Activity')}</div>
+			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
+				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400 table-auto">
+					<thead class="text-xs text-gray-800 uppercase dark:text-gray-200">
+						<tr class="border-b-[1.5px] border-gray-50 dark:border-gray-850/30">
+							<th scope="col" class="px-2.5 py-2 cursor-pointer" on:click={() => toggleApiUserSort('name')}>{$i18n.t('User')}</th>
+							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiUserSort('count')}>{$i18n.t('Calls')}</th>
+							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiUserSort('input_tokens')}>{$i18n.t('Input tokens')}</th>
+							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiUserSort('output_tokens')}>{$i18n.t('Output tokens')}</th>
+						</tr>
+					</thead>
+					<tbody>
+						{#each sortedApiUsers as apiUser (apiUser.user_id ?? 'unattributed')}
+							<tr class="dark:border-gray-850">
+								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white">{apiUser.name || apiUser.email || apiUser.user_id || $i18n.t('Unattributed')}</td>
+								<td class="px-2.5 py-1 text-right">{apiUser.count.toLocaleString()}</td>
+								<td class="px-2.5 py-1 text-right">{formatNumber(apiUser.input_tokens)}</td>
+								<td class="px-2.5 py-1 text-right">{formatNumber(apiUser.output_tokens)}</td>
+							</tr>
+						{:else}
+							<tr><td colspan="4" class="px-3 py-2 text-center text-gray-400">{$i18n.t('No data')}</td></tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		</div>
+	</div>
+	<div class="text-gray-500 text-xs mt-1.5 text-right">
+		ⓘ {$i18n.t('Unattributed calls include unauthenticated requests and earlier records.')}
+	</div>
+{:else}
 <!-- Model Details Modal -->
 <AnalyticsModelModal
 	bind:show={showModelModal}
@@ -318,7 +488,6 @@
 />
 
 <!-- Summary stats -->
-{#if !loading}
 	<div class="flex gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
 		<span
 			><span class="font-normal text-gray-900 dark:text-gray-300"
@@ -345,25 +514,6 @@
 			{$i18n.t('users')}</span
 		>
 	</div>
-	{#if apiCallCollectionEnabled}
-		<div class="flex flex-wrap gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
-			<span
-				><span class="text-gray-900 dark:text-gray-300"
-					>{formatNumber(apiCallSummary.total_calls)}</span
-				> {$i18n.t('API calls')}</span
-			>
-			<span
-				><span class="text-gray-900 dark:text-gray-300"
-					>{formatNumber(apiCallSummary.input_tokens)}</span
-				> {$i18n.t('Input tokens')}</span
-			>
-			<span
-				><span class="text-gray-900 dark:text-gray-300"
-					>{formatNumber(apiCallSummary.output_tokens)}</span
-				> {$i18n.t('Output tokens')}</span
-			>
-		</div>
-	{/if}
 
 	<!-- Daily usage chart -->
 	{#if dailyStats.length > 1}
@@ -393,13 +543,6 @@
 			/>
 		</div>
 	{/if}
-{/if}
-
-{#if loading}
-	<div class="my-10 flex justify-center">
-		<Spinner className="size-5" />
-	</div>
-{:else}
 	<div class="grid md:grid-cols-2 gap-4">
 		<!-- Model Usage Table -->
 		<div>

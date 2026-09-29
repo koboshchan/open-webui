@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query
 from open_webui.internal.db import get_async_session
@@ -13,6 +13,7 @@ from open_webui.models.feedbacks import Feedbacks
 from open_webui.models.groups import Groups
 from open_webui.models.users import Users
 from open_webui.utils.auth import get_admin_user
+from open_webui.utils.api_call_analytics import invalidate_collection_cache
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +36,7 @@ async def get_api_call_collection(user=Depends(get_admin_user)):
 @router.post('/api-calls/collection')
 async def set_api_call_collection(form_data: APICallCollectionForm, user=Depends(get_admin_user)):
     await Config.upsert({API_CALL_COLLECTION_CONFIG: form_data.enabled})
+    invalidate_collection_cache()
     return {'enabled': form_data.enabled}
 
 
@@ -42,10 +44,31 @@ async def set_api_call_collection(form_data: APICallCollectionForm, user=Depends
 async def get_api_call_summary(
     start_date: Optional[int] = Query(None),
     end_date: Optional[int] = Query(None),
+    group_id: Optional[str] = Query(None),
     user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await APICalls.summary(start_date=start_date, end_date=end_date, db=db)
+    return await APICalls.summary(start_date=start_date, end_date=end_date, group_id=group_id, db=db)
+
+
+@router.get('/api-calls/dashboard')
+async def get_api_call_dashboard(
+    start_date: Optional[int] = Query(None),
+    end_date: Optional[int] = Query(None),
+    group_id: Optional[str] = Query(None),
+    granularity: Literal['hourly', 'daily'] = Query('daily'),
+    timezone: str = Query('UTC'),
+    user=Depends(get_admin_user),
+    db: AsyncSession = Depends(get_async_session),
+):
+    return await APICalls.dashboard(
+        start_date=start_date,
+        end_date=end_date,
+        group_id=group_id,
+        granularity=granularity,
+        timezone=timezone,
+        db=db,
+    )
 
 
 ####################

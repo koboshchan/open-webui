@@ -22,15 +22,49 @@ export const setAPICallCollection = async (token: string = '', enabled: boolean)
 	return res.json();
 };
 
-export const getAPICallSummary = async (
+export type APICallDashboard = {
+	summary: {
+		total_calls: number;
+		input_tokens: number;
+		output_tokens: number;
+		total_tokens: number;
+		total_users: number;
+	};
+	timeline: { date: string; models: Record<string, number> }[];
+	routes: {
+		method: string;
+		path: string;
+		count: number;
+		input_tokens: number;
+		output_tokens: number;
+		total_tokens: number;
+	}[];
+	users: {
+		user_id: string | null;
+		name: string | null;
+		email: string | null;
+		count: number;
+		input_tokens: number;
+		output_tokens: number;
+		total_tokens: number;
+	}[];
+};
+
+export const getAPICallDashboard = async (
 	token: string = '',
 	startDate: number | null = null,
-	endDate: number | null = null
-) => {
+	endDate: number | null = null,
+	groupId: string | null = null,
+	granularity: 'hourly' | 'daily' = 'daily',
+	timezone: string = 'UTC'
+): Promise<APICallDashboard> => {
 	const searchParams = new URLSearchParams();
 	if (startDate) searchParams.append('start_date', startDate.toString());
 	if (endDate) searchParams.append('end_date', endDate.toString());
-	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/api-calls/summary?${searchParams}`, {
+	if (groupId) searchParams.append('group_id', groupId);
+	searchParams.append('granularity', granularity);
+	searchParams.append('timezone', timezone);
+	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/api-calls/dashboard?${searchParams}`, {
 		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
 	});
 	if (!res.ok) throw await res.json();
