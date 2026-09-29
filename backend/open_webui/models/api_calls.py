@@ -17,6 +17,7 @@ class APICall(Base):
     method = Column(Text, nullable=False, index=True)
     path = Column(Text, nullable=False, index=True)
     user_id = Column(Text, nullable=True, index=True)
+    model_id = Column(Text, nullable=True, index=True)
     status_code = Column(Integer, nullable=False)
     input_tokens = Column(Integer, nullable=False, default=0)
     output_tokens = Column(Integer, nullable=False, default=0)
@@ -30,6 +31,7 @@ class APICalls:
         path: str,
         status_code: int,
         user_id: str | None = None,
+        model_id: str | None = None,
         input_tokens: int = 0,
         output_tokens: int = 0,
         db: Optional[AsyncSession] = None,
@@ -41,6 +43,7 @@ class APICalls:
                     method=method,
                     path=path,
                     user_id=user_id,
+                    model_id=model_id,
                     status_code=status_code,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
@@ -107,17 +110,32 @@ class APICalls:
             summary = await APICalls.summary(start_date, end_date, group_id, db)
 
             minute = cast(func.floor(APICall.created_at / 60.0), BigInteger).label('minute')
-            minute_stmt = select(minute, func.count(APICall.id).label('count')).group_by(minute).order_by(minute)
+            minute_stmt = (
+                select(
+                    minute,
+                    APICall.model_id,
+                    func.count(APICall.id).label('count'),
+                    func.coalesce(func.sum(APICall.input_tokens + APICall.output_tokens), 0).label('tokens'),
+                )
+                .group_by(minute, APICall.model_id)
+                .order_by(minute)
+            )
             minute_rows = (
                 await db.execute(APICalls._filter(minute_stmt, start_date, end_date, group_id))
             ).all()
 
-            counts: dict[str, int] = {}
+            counts: dict[str, dict[str, int]] = {}
+            token_counts: dict[str, dict[str, int]] = {}
             for row in minute_rows:
                 timestamp = int(row.minute) * 60
                 dt = datetime.fromtimestamp(timestamp, tz)
                 key = dt.replace(minute=0).isoformat(timespec='minutes') if granularity == 'hourly' else dt.strftime('%Y-%m-%d')
-                counts[key] = counts.get(key, 0) + int(row.count)
+                model_id = row.model_id or ('Unattributed' if row.tokens else None)
+                if model_id is not None:
+                    bucket = counts.setdefault(key, {})
+                    bucket[model_id] = bucket.get(model_id, 0) + int(row.count)
+                    token_bucket = token_counts.setdefault(key, {})
+                    token_bucket[model_id] = token_bucket.get(model_id, 0) + int(row.tokens)
 
             timeline = []
             if granularity == 'hourly':
@@ -130,7 +148,7 @@ class APICalls:
                 if first is not None and last is not None:
                     for timestamp in range(first, last + 1, 3600):
                         key = datetime.fromtimestamp(timestamp, tz).isoformat(timespec='minutes')
-                        timeline.append({'date': key, 'models': {'API calls': counts.get(key, 0)}})
+                        timeline.append({'date': key, 'models': counts.get(key, {}), 'token_models': token_counts.get(key, {})})
             else:
                 first = datetime.fromtimestamp(start_date, tz).date() if start_date is not None else (
                     datetime.fromtimestamp(int(minute_rows[0].minute) * 60, tz).date() if minute_rows else None
@@ -142,32 +160,34 @@ class APICalls:
                     day = first
                     while day <= last:
                         key = day.isoformat()
-                        timeline.append({'date': key, 'models': {'API calls': counts.get(key, 0)}})
+                        timeline.append({'date': key, 'models': counts.get(key, {}), 'token_models': token_counts.get(key, {})})
                         day += timedelta(days=1)
 
-            route_stmt = (
+            model_stmt = (
                 select(
-                    APICall.method,
-                    APICall.path,
+                    APICall.model_id,
                     func.count(APICall.id).label('count'),
                     func.coalesce(func.sum(APICall.input_tokens), 0).label('input_tokens'),
                     func.coalesce(func.sum(APICall.output_tokens), 0).label('output_tokens'),
                 )
-                .group_by(APICall.method, APICall.path)
-                .order_by(func.count(APICall.id).desc(), APICall.path)
-                .limit(50)
+                .where(
+                    (APICall.model_id.is_not(None))
+                    | (APICall.input_tokens > 0)
+                    | (APICall.output_tokens > 0)
+                )
+                .group_by(APICall.model_id)
+                .order_by(func.count(APICall.id).desc(), APICall.model_id)
             )
-            route_rows = (await db.execute(APICalls._filter(route_stmt, start_date, end_date, group_id))).all()
-            routes = [
+            model_rows = (await db.execute(APICalls._filter(model_stmt, start_date, end_date, group_id))).all()
+            models = [
                 {
-                    'method': row.method,
-                    'path': row.path,
+                    'model_id': row.model_id,
                     'count': int(row.count),
                     'input_tokens': int(row.input_tokens),
                     'output_tokens': int(row.output_tokens),
                     'total_tokens': int(row.input_tokens + row.output_tokens),
                 }
-                for row in route_rows
+                for row in model_rows
             ]
 
             user_stmt = (
@@ -197,4 +217,4 @@ class APICalls:
                 for row in user_rows
             ]
 
-            return {'summary': summary, 'timeline': timeline, 'routes': routes, 'users': users}
+            return {'summary': summary, 'timeline': timeline, 'models': models, 'users': users}
