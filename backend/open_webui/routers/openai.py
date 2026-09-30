@@ -1562,6 +1562,8 @@ async def generate_chat_completion(
                 )
 
     is_streaming_request = bool(payload.get('stream', False))
+    if is_streaming_request and not is_responses and urlparse(url).hostname == 'api.openai.com':
+        payload['stream_options'] = {**(payload.get('stream_options') or {}), 'include_usage': True}
     if not is_streaming_request:
         payload.pop('stream_options', None)
 
