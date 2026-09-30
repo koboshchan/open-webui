@@ -129,6 +129,7 @@ from open_webui.utils.misc import (
 from open_webui.utils.payload import apply_params_to_form_data, apply_system_prompt_to_body, resolve_system_prompt
 from open_webui.utils.plugin import load_function_module_by_id
 from open_webui.utils.response import merge_usage, normalize_usage
+from open_webui.utils.api_call_analytics import record_async_model_usage
 from open_webui.utils.sanitize import sanitize_code
 from open_webui.utils.skills import (
     apply_skills_create_prompt,
@@ -4363,6 +4364,7 @@ async def non_streaming_chat_response_handler(response, ctx):
                     usage = normalize_usage(response_data.get('usage', {}) or {})
 
                     if save_to_chat:
+                        await record_async_model_usage(request, ctx['form_data'].get('model'), usage, user.id)
                         await Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata['chat_id'],
                             metadata['message_id'],
@@ -6550,6 +6552,7 @@ async def streaming_chat_response_handler(response, ctx):
                 }
 
                 if save_to_chat:
+                    await record_async_model_usage(request, form_data.get('model'), usage, user.id)
                     # Save final output once. The delta path keeps in-progress
                     # state in response_streams instead of writing tokens to DB.
                     await Chats.upsert_message_to_chat_by_id_and_message_id(
