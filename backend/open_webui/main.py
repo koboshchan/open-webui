@@ -1807,6 +1807,8 @@ async def chat_completion(
         subagent_results = []
         is_internal = getattr(request.state, 'internal', False) is True
         chat_id = metadata['chat_id']
+        if not is_internal:
+            request.state.api_call_analytics_async = True
 
         for idx, entry in enumerate(message_ids):
             target_model_id = entry['model_id']

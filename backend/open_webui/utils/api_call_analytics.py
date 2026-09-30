@@ -1,6 +1,7 @@
 import json
 import re
 import time
+import uuid
 
 from open_webui.models.api_calls import APICalls
 from open_webui.models.config import Config
@@ -11,6 +12,26 @@ _collection_cache_version = 0
 def invalidate_collection_cache() -> None:
     global _collection_cache_version
     _collection_cache_version += 1
+
+
+async def record_async_model_usage(request, model_id: str | None, usage: dict | None, user_id: str | None) -> None:
+    """Attach a saved chat's completed model usage to its originating API request."""
+    call_id = getattr(request.state, 'api_call_analytics_id', None)
+    if not call_id or not getattr(request.state, 'api_call_analytics_async', False):
+        return
+    input_tokens, output_tokens = APICallAnalyticsMiddleware._usage_counts(usage or {})
+    try:
+        await APICalls.record_model_usage(
+            api_call_id=call_id,
+            model_id=model_id,
+            user_id=user_id,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            created_at=getattr(request.state, 'api_call_analytics_created_at', int(time.time())),
+        )
+    except Exception:
+        # Analytics must not interrupt a completed chat response.
+        pass
 
 
 class APICallAnalyticsMiddleware:
@@ -43,7 +64,7 @@ class APICallAnalyticsMiddleware:
         if not body:
             return 0, 0
         try:
-            text = body.decode('utf-8')
+            text = body.decode('utf-8', errors='ignore')
             try:
                 payloads = [json.loads(text)]
             except (ValueError, TypeError):
@@ -57,7 +78,7 @@ class APICallAnalyticsMiddleware:
                         payloads.append(json.loads(line))
                     except (ValueError, TypeError):
                         continue
-        except (UnicodeDecodeError, ValueError):
+        except ValueError:
             return 0, 0
 
         usages = []
@@ -75,19 +96,27 @@ class APICallAnalyticsMiddleware:
 
         for payload in payloads:
             walk(payload)
-        if not usages:
-            return 0, 0
-        usage = usages[-1]
+        token_keys = {
+            'input_tokens', 'prompt_tokens', 'prompt_eval_count', 'prompt_n', 'cache_n',
+            'output_tokens', 'completion_tokens', 'eval_count', 'predicted_n',
+        }
+        for usage in reversed(usages):
+            if any(key in usage for key in token_keys):
+                return APICallAnalyticsMiddleware._usage_counts(usage)
+        return 0, 0
+
+    @staticmethod
+    def _usage_counts(usage: dict) -> tuple[int, int]:
         try:
-            input_tokens = usage.get('input_tokens') or usage.get('prompt_tokens') or usage.get('prompt_eval_count')
+            input_tokens = next(
+                (usage[key] for key in ('input_tokens', 'prompt_tokens', 'prompt_eval_count') if usage.get(key) is not None),
+                None,
+            )
             if input_tokens is None:
                 input_tokens = int(usage.get('prompt_n') or 0) + int(usage.get('cache_n') or 0)
-            output_tokens = (
-                usage.get('output_tokens')
-                or usage.get('completion_tokens')
-                or usage.get('eval_count')
-                or usage.get('predicted_n')
-                or 0
+            output_tokens = next(
+                (usage[key] for key in ('output_tokens', 'completion_tokens', 'eval_count', 'predicted_n') if usage.get(key) is not None),
+                0,
             )
             return max(0, int(input_tokens)), max(0, int(output_tokens))
         except (TypeError, ValueError):
@@ -105,22 +134,19 @@ class APICallAnalyticsMiddleware:
                     return model.strip()[:512]
             return None
 
+        text = body.decode('utf-8', errors='ignore')
         try:
-            text = body.decode('utf-8')
-            try:
-                return model_from_payload(json.loads(text))
-            except (ValueError, TypeError):
-                for line in text.splitlines():
-                    if not line.startswith('data:'):
-                        continue
-                    try:
-                        model = model_from_payload(json.loads(line.removeprefix('data:').strip()))
-                    except (ValueError, TypeError):
-                        continue
-                    if model:
-                        return model
-        except UnicodeDecodeError:
-            pass
+            return model_from_payload(json.loads(text))
+        except (ValueError, TypeError):
+            for line in text.splitlines():
+                if not line.startswith('data:'):
+                    continue
+                try:
+                    model = model_from_payload(json.loads(line.removeprefix('data:').strip()))
+                except (ValueError, TypeError):
+                    continue
+                if model:
+                    return model
         return None
 
     async def __call__(self, scope, receive, send):
@@ -135,6 +161,11 @@ class APICallAnalyticsMiddleware:
 
         response_body = bytearray()
         request_body = bytearray()
+        call_id = str(uuid.uuid4())
+        created_at = int(time.time())
+        state = scope.setdefault('state', {})
+        state['api_call_analytics_id'] = call_id
+        state['api_call_analytics_created_at'] = created_at
         capture_model = scope.get('method') == 'POST' and bool(self.MODEL_PATH.search(path))
         request_too_large = False
         status_code = 500
@@ -179,6 +210,8 @@ class APICallAnalyticsMiddleware:
                     model_id=model_id,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
+                    call_id=call_id,
+                    created_at=created_at,
                 )
             except Exception:
                 # Collection should never interfere with API responses.
