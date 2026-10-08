@@ -4222,6 +4222,9 @@ async def non_streaming_chat_response_handler(response, ctx):
     if response_data is None:
         return response
 
+    await record_async_model_usage(
+        request, ctx['form_data'].get('model'), normalize_usage(response_data.get('usage', {}) or {}), user.id
+    )
     chat_id = metadata.get('chat_id') or ''
     save_to_chat = is_saved_chat_id(chat_id)
     continuing = bool(metadata.get('assistant_message_id'))
@@ -4364,7 +4367,6 @@ async def non_streaming_chat_response_handler(response, ctx):
                     usage = normalize_usage(response_data.get('usage', {}) or {})
 
                     if save_to_chat:
-                        await record_async_model_usage(request, ctx['form_data'].get('model'), usage, user.id)
                         await Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata['chat_id'],
                             metadata['message_id'],
@@ -4821,6 +4823,7 @@ async def streaming_chat_response_handler(response, ctx):
                 content_parts = []
 
             usage = None
+            analytics_usage_recorded = False
             last_response_id = None
 
             def full_output():
@@ -6551,8 +6554,9 @@ async def streaming_chat_response_handler(response, ctx):
                     **({'usage': usage} if usage else {}),
                 }
 
+                await record_async_model_usage(request, form_data.get('model'), usage, user.id)
+                analytics_usage_recorded = True
                 if save_to_chat:
-                    await record_async_model_usage(request, form_data.get('model'), usage, user.id)
                     # Save final output once. The delta path keeps in-progress
                     # state in response_streams instead of writing tokens to DB.
                     await Chats.upsert_message_to_chat_by_id_and_message_id(
@@ -6605,6 +6609,8 @@ async def streaming_chat_response_handler(response, ctx):
                         pass
 
                 async def save_cancelled_state():
+                    if usage and not analytics_usage_recorded:
+                        await record_async_model_usage(request, form_data.get('model'), usage, user.id)
                     cancelled_output = full_output()
                     result_call_ids = {
                         item.get('call_id')
