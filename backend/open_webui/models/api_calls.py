@@ -1,13 +1,13 @@
+import math
 import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from open_webui.internal.db import Base, get_async_db_context
 from sqlalchemy import BigInteger, Column, Integer, Text, cast, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from open_webui.internal.db import Base, get_async_db_context
 
 
 class APICall(Base):
@@ -150,6 +150,8 @@ class APICalls:
         group_id: str | None = None,
         granularity: str = 'daily',
         timezone: str = 'UTC',
+        user_order_by: str = 'count',
+        user_direction: str = 'desc',
         db: Optional[AsyncSession] = None,
     ) -> dict:
         from open_webui.models.users import Users
@@ -160,12 +162,32 @@ class APICalls:
             tz = ZoneInfo('UTC')
 
         async with get_async_db_context(db) as db:
+            # Bound implicit all-time ranges before loading grouped timeline rows.
+            extrema = []
+            for source in (APICall, APICallModelUsage):
+                statement = select(func.min(source.created_at), func.max(source.created_at))
+                row = (await db.execute(APICalls._filter(statement, start_date, end_date, group_id, source))).one()
+                extrema.extend(value for value in row if value is not None)
+            first_ts = start_date if start_date is not None else min(extrema) if extrema else None
+            last_ts = end_date if end_date is not None else max(extrema) if extrema else None
+            bucket_seconds = 60
+            if first_ts is not None and last_ts is not None:
+                width = 3600 if granularity == 'hourly' else 86400
+                if first_ts > last_ts or (last_ts - first_ts) // width + 2 > 10000:
+                    raise ValueError('Select a shorter date range (maximum 10000 buckets)')
+                # Modern zone offsets divide the aggregation width. Sample each UTC day
+                # to include both seasonal offsets; retain minute precision for historical zones.
+                if first_ts >= 946684800:
+                    bucket_seconds = width
+                    for timestamp in range(first_ts, last_ts + 86400, 86400):
+                        offset = int(datetime.fromtimestamp(timestamp, tz).utcoffset().total_seconds())
+                        bucket_seconds = math.gcd(bucket_seconds, abs(offset))
+                    bucket_seconds = math.gcd(bucket_seconds, 3600) if timezone != 'UTC' else bucket_seconds
+
             summary = await APICalls.summary(start_date, end_date, group_id, db)
 
-            has_model_usage = select(APICallModelUsage.id).where(
-                APICallModelUsage.api_call_id == APICall.id
-            ).exists()
-            minute = cast(func.floor(APICall.created_at / 60.0), BigInteger).label('minute')
+            has_model_usage = select(APICallModelUsage.id).where(APICallModelUsage.api_call_id == APICall.id).exists()
+            minute = cast(func.floor(APICall.created_at / float(bucket_seconds)), BigInteger).label('minute')
             minute_stmt = (
                 select(
                     minute,
@@ -177,33 +199,37 @@ class APICalls:
                 .group_by(minute, APICall.model_id)
                 .order_by(minute)
             )
-            minute_rows = (
-                await db.execute(APICalls._filter(minute_stmt, start_date, end_date, group_id))
-            ).all()
-            usage_minute = cast(func.floor(APICallModelUsage.created_at / 60.0), BigInteger).label('minute')
+            minute_rows = (await db.execute(APICalls._filter(minute_stmt, start_date, end_date, group_id))).all()
+            usage_minute = cast(func.floor(APICallModelUsage.created_at / float(bucket_seconds)), BigInteger).label(
+                'minute'
+            )
             usage_minute_stmt = (
                 select(
                     usage_minute,
                     APICallModelUsage.model_id,
                     func.count(APICallModelUsage.id).label('count'),
-                    func.coalesce(func.sum(APICallModelUsage.input_tokens + APICallModelUsage.output_tokens), 0).label('tokens'),
+                    func.coalesce(func.sum(APICallModelUsage.input_tokens + APICallModelUsage.output_tokens), 0).label(
+                        'tokens'
+                    ),
                 )
                 .group_by(usage_minute, APICallModelUsage.model_id)
                 .order_by(usage_minute)
             )
             usage_minute_rows = (
-                await db.execute(
-                    APICalls._filter(usage_minute_stmt, start_date, end_date, group_id, APICallModelUsage)
-                )
+                await db.execute(APICalls._filter(usage_minute_stmt, start_date, end_date, group_id, APICallModelUsage))
             ).all()
 
             counts: dict[str, dict[str, int]] = {}
             token_counts: dict[str, dict[str, int]] = {}
-            for row, is_usage in [(row, False) for row in minute_rows] + [(row, True) for row in usage_minute_rows]:
-                timestamp = int(row.minute) * 60
+            for row in [*minute_rows, *usage_minute_rows]:
+                timestamp = int(row.minute) * bucket_seconds
                 dt = datetime.fromtimestamp(timestamp, tz)
-                key = dt.replace(minute=0).isoformat(timespec='minutes') if granularity == 'hourly' else dt.strftime('%Y-%m-%d')
-                model_id = row.model_id or ('Unattributed' if row.tokens or is_usage else None)
+                key = (
+                    dt.replace(minute=0).isoformat(timespec='minutes')
+                    if granularity == 'hourly'
+                    else dt.strftime('%Y-%m-%d')
+                )
+                model_id = row.model_id or 'Unattributed'
                 if model_id is not None:
                     bucket = counts.setdefault(key, {})
                     bucket[model_id] = bucket.get(model_id, 0) + int(row.count)
@@ -213,28 +239,63 @@ class APICalls:
             timeline = []
             observed_minutes = [int(row.minute) for row in [*minute_rows, *usage_minute_rows]]
             if granularity == 'hourly':
-                first = (start_date // 3600 * 3600) if start_date is not None else (
-                    min(observed_minutes) * 60 // 3600 * 3600 if observed_minutes else None
+                first_ts = (
+                    start_date
+                    if start_date is not None
+                    else min(observed_minutes) * bucket_seconds
+                    if observed_minutes
+                    else None
                 )
-                last = (end_date // 3600 * 3600) if end_date is not None else (
-                    max(observed_minutes) * 60 // 3600 * 3600 if observed_minutes else None
+                last_ts = (
+                    end_date
+                    if end_date is not None
+                    else max(observed_minutes) * bucket_seconds
+                    if observed_minutes
+                    else None
                 )
-                if first is not None and last is not None:
-                    for timestamp in range(first, last + 1, 3600):
-                        key = datetime.fromtimestamp(timestamp, tz).isoformat(timespec='minutes')
-                        timeline.append({'date': key, 'models': counts.get(key, {}), 'token_models': token_counts.get(key, {})})
+                if first_ts is not None and last_ts is not None:
+                    first = int(datetime.fromtimestamp(first_ts, tz).replace(minute=0, second=0).timestamp())
+                    last = int(datetime.fromtimestamp(last_ts, tz).replace(minute=0, second=0).timestamp())
+                    # Iterate in UTC to retain both offset-separated hours at DST fallback.
+                    if (last - first) // 3600 + 1 > 10000:
+                        raise ValueError('Select a shorter date range (maximum 10000 hourly buckets)')
+                    seen_hours = set()
+                    for timestamp in range(first, last + 1, math.gcd(3600, bucket_seconds)):
+                        key = datetime.fromtimestamp(timestamp, tz).replace(minute=0).isoformat(timespec='minutes')
+                        if key in seen_hours:
+                            continue
+                        seen_hours.add(key)
+                        timeline.append(
+                            {'date': key, 'models': counts.get(key, {}), 'token_models': token_counts.get(key, {})}
+                        )
             else:
-                first = datetime.fromtimestamp(start_date, tz).date() if start_date is not None else (
-                    datetime.fromtimestamp(min(observed_minutes) * 60, tz).date() if observed_minutes else None
+                first = (
+                    datetime.fromtimestamp(start_date, tz).date()
+                    if start_date is not None
+                    else (
+                        datetime.fromtimestamp(min(observed_minutes) * bucket_seconds, tz).date()
+                        if observed_minutes
+                        else None
+                    )
                 )
-                last = datetime.fromtimestamp(end_date, tz).date() if end_date is not None else (
-                    datetime.fromtimestamp(max(observed_minutes) * 60, tz).date() if observed_minutes else None
+                last = (
+                    datetime.fromtimestamp(end_date, tz).date()
+                    if end_date is not None
+                    else (
+                        datetime.fromtimestamp(max(observed_minutes) * bucket_seconds, tz).date()
+                        if observed_minutes
+                        else None
+                    )
                 )
                 if first is not None and last is not None:
+                    if (last - first).days + 1 > 10000:
+                        raise ValueError('Select a shorter date range (maximum 10000 daily buckets)')
                     day = first
                     while day <= last:
                         key = day.isoformat()
-                        timeline.append({'date': key, 'models': counts.get(key, {}), 'token_models': token_counts.get(key, {})})
+                        timeline.append(
+                            {'date': key, 'models': counts.get(key, {}), 'token_models': token_counts.get(key, {})}
+                        )
                         day += timedelta(days=1)
 
             model_stmt = (
@@ -244,29 +305,19 @@ class APICalls:
                     func.coalesce(func.sum(APICall.input_tokens), 0).label('input_tokens'),
                     func.coalesce(func.sum(APICall.output_tokens), 0).label('output_tokens'),
                 )
-                .where(
-                    (APICall.model_id.is_not(None))
-                    | (APICall.input_tokens > 0)
-                    | (APICall.output_tokens > 0)
-                )
                 .where(~has_model_usage)
                 .group_by(APICall.model_id)
                 .order_by(func.count(APICall.id).desc(), APICall.model_id)
             )
             model_rows = (await db.execute(APICalls._filter(model_stmt, start_date, end_date, group_id))).all()
-            usage_model_stmt = (
-                select(
-                    APICallModelUsage.model_id,
-                    func.count(APICallModelUsage.id).label('count'),
-                    func.coalesce(func.sum(APICallModelUsage.input_tokens), 0).label('input_tokens'),
-                    func.coalesce(func.sum(APICallModelUsage.output_tokens), 0).label('output_tokens'),
-                )
-                .group_by(APICallModelUsage.model_id)
-            )
+            usage_model_stmt = select(
+                APICallModelUsage.model_id,
+                func.count(APICallModelUsage.id).label('count'),
+                func.coalesce(func.sum(APICallModelUsage.input_tokens), 0).label('input_tokens'),
+                func.coalesce(func.sum(APICallModelUsage.output_tokens), 0).label('output_tokens'),
+            ).group_by(APICallModelUsage.model_id)
             usage_model_rows = (
-                await db.execute(
-                    APICalls._filter(usage_model_stmt, start_date, end_date, group_id, APICallModelUsage)
-                )
+                await db.execute(APICalls._filter(usage_model_stmt, start_date, end_date, group_id, APICallModelUsage))
             ).all()
             model_totals: dict[str | None, dict] = {}
             for row in [*model_rows, *usage_model_rows]:
@@ -289,21 +340,15 @@ class APICalls:
                 )
                 .group_by(APICall.user_id)
                 .order_by(func.count(APICall.id).desc())
-                .limit(50)
             )
             user_rows = (await db.execute(APICalls._filter(user_stmt, start_date, end_date, group_id))).all()
-            usage_user_stmt = (
-                select(
-                    APICallModelUsage.user_id,
-                    func.coalesce(func.sum(APICallModelUsage.input_tokens), 0).label('input_tokens'),
-                    func.coalesce(func.sum(APICallModelUsage.output_tokens), 0).label('output_tokens'),
-                )
-                .group_by(APICallModelUsage.user_id)
-            )
+            usage_user_stmt = select(
+                APICallModelUsage.user_id,
+                func.coalesce(func.sum(APICallModelUsage.input_tokens), 0).label('input_tokens'),
+                func.coalesce(func.sum(APICallModelUsage.output_tokens), 0).label('output_tokens'),
+            ).group_by(APICallModelUsage.user_id)
             usage_user_rows = (
-                await db.execute(
-                    APICalls._filter(usage_user_stmt, start_date, end_date, group_id, APICallModelUsage)
-                )
+                await db.execute(APICalls._filter(usage_user_stmt, start_date, end_date, group_id, APICallModelUsage))
             ).all()
             usage_by_user = {row.user_id: row for row in usage_user_rows}
             known_ids = [row.user_id for row in user_rows if row.user_id]
@@ -314,11 +359,30 @@ class APICalls:
                     'name': user_info[row.user_id].name if row.user_id in user_info else None,
                     'email': user_info[row.user_id].email if row.user_id in user_info else None,
                     'count': int(row.count),
-                    'input_tokens': int(row.input_tokens + (usage_by_user[row.user_id].input_tokens if row.user_id in usage_by_user else 0)),
-                    'output_tokens': int(row.output_tokens + (usage_by_user[row.user_id].output_tokens if row.user_id in usage_by_user else 0)),
-                    'total_tokens': int(row.input_tokens + row.output_tokens + (usage_by_user[row.user_id].input_tokens + usage_by_user[row.user_id].output_tokens if row.user_id in usage_by_user else 0)),
+                    'input_tokens': int(
+                        row.input_tokens
+                        + (usage_by_user[row.user_id].input_tokens if row.user_id in usage_by_user else 0)
+                    ),
+                    'output_tokens': int(
+                        row.output_tokens
+                        + (usage_by_user[row.user_id].output_tokens if row.user_id in usage_by_user else 0)
+                    ),
+                    'total_tokens': int(
+                        row.input_tokens
+                        + row.output_tokens
+                        + (
+                            usage_by_user[row.user_id].input_tokens + usage_by_user[row.user_id].output_tokens
+                            if row.user_id in usage_by_user
+                            else 0
+                        )
+                    ),
                 }
                 for row in user_rows
             ]
 
-            return {'summary': summary, 'timeline': timeline, 'models': models, 'users': users}
+            users.sort(key=lambda row: row['user_id'] or '')
+            users.sort(
+                key=lambda row: (row['name'] or '').casefold() if user_order_by == 'name' else row[user_order_by],
+                reverse=user_direction == 'desc',
+            )
+            return {'summary': summary, 'timeline': timeline, 'models': models, 'users': users[:50]}
