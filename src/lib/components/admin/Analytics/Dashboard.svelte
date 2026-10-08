@@ -21,7 +21,6 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import { formatNumber } from '$lib/utils';
-	import { goto } from '$app/navigation';
 	import { toast } from 'svelte-sonner';
 
 	const i18n = getContext('i18n');
@@ -265,35 +264,35 @@
 		try {
 			const result = await setAPICallCollection(localStorage.token, !apiCallCollectionEnabled);
 			apiCallCollectionEnabled = result.enabled;
-		} catch (err: any) {
+		} catch (err: unknown) {
 			console.error('Could not update API call collection:', err);
+			const detail = (err as { detail?: unknown } | null)?.detail;
 			toast.error(
-				typeof err?.detail === 'string'
-					? err.detail
-					: $i18n.t('Could not update API call collection')
+				typeof detail === 'string' ? detail : $i18n.t('Could not update API call collection')
 			);
 		} finally {
 			apiCallCollectionSaving = false;
 		}
 	};
 
+	const reloadDeps = (...deps: unknown[]) => deps.length > 0;
+
 	// Reload when the period, group, or custom range changes.
 	// In custom mode, wait until both dates are set to avoid a half-specified query.
 	$: if (collectionLoaded && selectedPeriod === 'custom' && !(customStart && customEnd)) {
 		loadVersion++; // drop any in-flight result for the previous range
 		loading = false;
-	} else if (collectionLoaded && analyticsSource && selectedPeriod) {
-		// reference customStart/customEnd so this block reruns when they change
-		customStart;
-		customEnd;
-		selectedGroupId;
-		analyticsSource;
-		apiUserOrderBy;
-		apiUserDirection;
+	} else if (
+		collectionLoaded &&
+		analyticsSource &&
+		selectedPeriod &&
+		// list these so the block reruns when any of them change
+		reloadDeps(customStart, customEnd, selectedGroupId, apiUserOrderBy, apiUserDirection)
+	) {
 		loadDashboard();
 	}
 
-	const applyCollectionResult = (result: PromiseSettledResult<any>) => {
+	const applyCollectionResult = (result: PromiseSettledResult<{ enabled?: boolean } | null>) => {
 		if (result.status === 'fulfilled') {
 			collectionError = false;
 			apiCallCollectionEnabled = Boolean(result.value?.enabled);
