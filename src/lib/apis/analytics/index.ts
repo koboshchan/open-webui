@@ -1,10 +1,22 @@
 import { WEBUI_API_BASE_URL } from '$lib/constants';
 
+const readError = async (res: Response) => {
+	const text = await res.text().catch(() => '');
+	try {
+		return JSON.parse(text);
+	} catch {
+		return { detail: text?.trim() ? `${res.status} ${res.statusText}: ${text.trim().slice(0, 200)}` : `${res.status} ${res.statusText}`, status: res.status };
+	}
+};
+
+export type APICallUserOrderBy = 'count' | 'name' | 'input_tokens' | 'output_tokens';
+export type SortDirection = 'asc' | 'desc';
+
 export const getAPICallCollection = async (token: string = '') => {
 	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/api-calls/collection`, {
 		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
 	});
-	if (!res.ok) throw await res.json();
+	if (!res.ok) throw await readError(res);
 	return res.json();
 };
 
@@ -18,7 +30,7 @@ export const setAPICallCollection = async (token: string = '', enabled: boolean)
 		},
 		body: JSON.stringify({ enabled })
 	});
-	if (!res.ok) throw await res.json();
+	if (!res.ok) throw await readError(res);
 	return res.json();
 };
 
@@ -55,18 +67,22 @@ export const getAPICallDashboard = async (
 	endDate: number | null = null,
 	groupId: string | null = null,
 	granularity: 'hourly' | 'daily' = 'daily',
-	timezone: string = 'UTC'
+	timezone: string = 'UTC',
+	userOrderBy: APICallUserOrderBy = 'count',
+	userDirection: SortDirection = 'desc'
 ): Promise<APICallDashboard> => {
 	const searchParams = new URLSearchParams();
-	if (startDate) searchParams.append('start_date', startDate.toString());
-	if (endDate) searchParams.append('end_date', endDate.toString());
+	if (startDate != null) searchParams.append('start_date', startDate.toString());
+	if (endDate != null) searchParams.append('end_date', endDate.toString());
 	if (groupId) searchParams.append('group_id', groupId);
 	searchParams.append('granularity', granularity);
 	searchParams.append('timezone', timezone);
+	searchParams.append('user_order_by', userOrderBy);
+	searchParams.append('user_direction', userDirection);
 	const res = await fetch(`${WEBUI_API_BASE_URL}/analytics/api-calls/dashboard?${searchParams}`, {
 		headers: { Accept: 'application/json', authorization: `Bearer ${token}` }
 	});
-	if (!res.ok) throw await res.json();
+	if (!res.ok) throw await readError(res);
 	return res.json();
 };
 
