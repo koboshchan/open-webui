@@ -53,12 +53,15 @@
 	};
 	// Custom ranges pick a label format from their real length so long ranges show years.
 	const customChartPeriod = (start: string, end: string): 'week' | 'month' | 'year' => {
-		const days = (new Date(end + 'T00:00:00').getTime() - new Date(start + 'T00:00:00').getTime()) / 86400000;
+		const days =
+			(new Date(end + 'T00:00:00').getTime() - new Date(start + 'T00:00:00').getTime()) / 86400000;
 		if (!Number.isFinite(days) || days <= 31) return 'week';
 		return days <= 90 ? 'month' : 'year';
 	};
 	$: chartPeriod =
-		selectedPeriod === 'custom' ? customChartPeriod(customStart, customEnd) : chartPeriods[selectedPeriod] || 'week';
+		selectedPeriod === 'custom'
+			? customChartPeriod(customStart, customEnd)
+			: chartPeriods[selectedPeriod] || 'week';
 
 	// User group filter
 	let groups: Array<{ id: string; name: string }> = [];
@@ -78,7 +81,9 @@
 				return { start: now - 90 * day, end: now };
 			case 'custom': {
 				// Date inputs are local calendar days, including days with a DST change.
-				const start = customStart ? Math.floor(new Date(`${customStart}T00:00:00`).getTime() / 1000) : null;
+				const start = customStart
+					? Math.floor(new Date(`${customStart}T00:00:00`).getTime() / 1000)
+					: null;
 				const endDay = customEnd ? new Date(`${customEnd}T00:00:00`) : null;
 				if (endDay) endDay.setDate(endDay.getDate() + 1);
 				const end = endDay ? Math.floor(endDay.getTime() / 1000) - 1 : null;
@@ -142,7 +147,16 @@
 	let apiModelOrderBy: 'model_id' | 'count' | 'input_tokens' | 'output_tokens' = 'count';
 	let apiModelDirection: 'asc' | 'desc' = 'desc';
 	let apiModelGraphMetric: 'calls' | 'tokens' = 'tokens';
-	const apiChartColors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+	const apiChartColors = [
+		'#3b82f6',
+		'#10b981',
+		'#f59e0b',
+		'#ef4444',
+		'#8b5cf6',
+		'#ec4899',
+		'#06b6d4',
+		'#84cc16'
+	];
 
 	const ariaSort = (active: boolean, direction: 'asc' | 'desc') =>
 		active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none';
@@ -312,9 +326,10 @@
 	});
 
 	$: sortedApiModels = [...apiDashboard.models].sort((a, b) => {
-		const compare = apiModelOrderBy === 'model_id'
-			? (a.model_id || '').localeCompare(b.model_id || '')
-			: a[apiModelOrderBy] - b[apiModelOrderBy];
+		const compare =
+			apiModelOrderBy === 'model_id'
+				? (a.model_id || '').localeCompare(b.model_id || '')
+				: a[apiModelOrderBy] - b[apiModelOrderBy];
 		return apiModelDirection === 'asc' ? compare : -compare;
 	});
 	$: apiChartData = apiDashboard.timeline.map((point) => ({
@@ -322,9 +337,9 @@
 		models: apiModelGraphMetric === 'tokens' ? point.token_models : point.models
 	}));
 	$: apiChartModels = [...apiDashboard.models]
-		.sort((a, b) => apiModelGraphMetric === 'tokens'
-			? b.total_tokens - a.total_tokens
-			: b.count - a.count)
+		.sort((a, b) =>
+			apiModelGraphMetric === 'tokens' ? b.total_tokens - a.total_tokens : b.count - a.count
+		)
 		.slice(0, 8)
 		.map((model) => model.model_id || 'Unattributed');
 
@@ -458,7 +473,9 @@
 {#if !collectionLoaded || loading}
 	<div class="my-10 flex justify-center"><Spinner className="size-5" /></div>
 {:else if dashboardError}
-	<div class="text-sm text-red-500 py-8 text-center">{$i18n.t('Failed to load analytics data')}</div>
+	<div class="text-sm text-red-500 py-8 text-center">
+		{$i18n.t('Failed to load analytics data')}
+	</div>
 {:else if selectedPeriod === 'custom' && !(customStart && customEnd)}
 	<div class="text-sm text-gray-400 py-8 text-center">{$i18n.t('Select a start and end date')}</div>
 {:else if analyticsSource === 'api'}
@@ -468,10 +485,34 @@
 		</div>
 	{/if}
 	<div class="flex flex-wrap gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
-		<span><span class="text-gray-900 dark:text-gray-300">{apiDashboard.summary.total_calls.toLocaleString()}</span> <Tooltip content={$i18n.t('HTTP requests recorded. One request can produce several model completions.')}>{$i18n.t('HTTP requests')}</Tooltip></span>
-		<span><span class="text-gray-900 dark:text-gray-300">{formatNumber(apiDashboard.summary.input_tokens)}</span> {$i18n.t('Input tokens')}</span>
-		<span><span class="text-gray-900 dark:text-gray-300">{formatNumber(apiDashboard.summary.output_tokens)}</span> {$i18n.t('Output tokens')}</span>
-		<span><span class="text-gray-900 dark:text-gray-300">{apiDashboard.summary.total_users.toLocaleString()}</span> {$i18n.t('users')}</span>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{apiDashboard.summary.total_calls.toLocaleString()}</span
+			>
+			<Tooltip
+				content={$i18n.t(
+					'HTTP requests recorded. One request can produce several model completions.'
+				)}>{$i18n.t('HTTP requests')}</Tooltip
+			></span
+		>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{formatNumber(apiDashboard.summary.input_tokens)}</span
+			>
+			{$i18n.t('Input tokens')}</span
+		>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{formatNumber(apiDashboard.summary.output_tokens)}</span
+			>
+			{$i18n.t('Output tokens')}</span
+		>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{apiDashboard.summary.total_users.toLocaleString()}</span
+			>
+			{$i18n.t('users')}</span
+		>
 	</div>
 
 	<div class="mb-4">
@@ -480,9 +521,20 @@
 				{selectedPeriod === '24h' ? $i18n.t('Hourly Model Usage') : $i18n.t('Daily Model Usage')}
 			</div>
 			<div class="flex gap-1 text-xs" role="group" aria-label={$i18n.t('Chart metric')}>
-				<button type="button" aria-pressed={apiModelGraphMetric === 'tokens'} class:font-semibold={apiModelGraphMetric === 'tokens'} on:click={() => (apiModelGraphMetric = 'tokens')}>{$i18n.t('Tokens')}</button>
+				<button
+					type="button"
+					aria-pressed={apiModelGraphMetric === 'tokens'}
+					class:font-semibold={apiModelGraphMetric === 'tokens'}
+					on:click={() => (apiModelGraphMetric = 'tokens')}>{$i18n.t('Tokens')}</button
+				>
 				<span class="text-gray-400">/</span>
-				<button type="button" aria-pressed={apiModelGraphMetric === 'calls'} class:font-semibold={apiModelGraphMetric === 'calls'} on:click={() => (apiModelGraphMetric = 'calls')} title={$i18n.t('Requests / completions')}>{$i18n.t('Calls')}</button>
+				<button
+					type="button"
+					aria-pressed={apiModelGraphMetric === 'calls'}
+					class:font-semibold={apiModelGraphMetric === 'calls'}
+					on:click={() => (apiModelGraphMetric = 'calls')}
+					title={$i18n.t('Requests / completions')}>{$i18n.t('Calls')}</button
+				>
 			</div>
 		</div>
 		{#if apiDashboard.timeline.length > 1 && apiChartModels.length > 0}
@@ -500,54 +552,178 @@
 
 	<div class="grid md:grid-cols-2 gap-4">
 		<div>
-			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">{$i18n.t('Model Usage')}</div>
+			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">
+				{$i18n.t('Model Usage')}
+			</div>
 			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
 				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400 table-auto">
 					<thead class="text-xs text-gray-800 uppercase dark:text-gray-200">
 						<tr class="border-b-[1.5px] border-gray-50 dark:border-gray-850/30">
-							<th scope="col" class="px-2.5 py-2" aria-sort={ariaSort(apiModelOrderBy === 'model_id', apiModelDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiModelSort('model_id')}>{$i18n.t('Model')}{#if apiModelOrderBy === 'model_id'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
-							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiModelOrderBy === 'count', apiModelDirection)}><button type="button" class="uppercase hover:underline" title={$i18n.t('Requests / completions')} on:click={() => toggleApiModelSort('count')}>{$i18n.t('Calls')}{#if apiModelOrderBy === 'count'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
-							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiModelOrderBy === 'input_tokens', apiModelDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiModelSort('input_tokens')}>{$i18n.t('Input tokens')}{#if apiModelOrderBy === 'input_tokens'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
-							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiModelOrderBy === 'output_tokens', apiModelDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiModelSort('output_tokens')}>{$i18n.t('Output tokens')}{#if apiModelOrderBy === 'output_tokens'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
+							<th
+								scope="col"
+								class="px-2.5 py-2"
+								aria-sort={ariaSort(apiModelOrderBy === 'model_id', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiModelSort('model_id')}
+									>{$i18n.t('Model')}{#if apiModelOrderBy === 'model_id'}<span aria-hidden="true">
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiModelOrderBy === 'count', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									title={$i18n.t('Requests / completions')}
+									on:click={() => toggleApiModelSort('count')}
+									>{$i18n.t('Calls')}{#if apiModelOrderBy === 'count'}<span aria-hidden="true">
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiModelOrderBy === 'input_tokens', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiModelSort('input_tokens')}
+									>{$i18n.t('Input tokens')}{#if apiModelOrderBy === 'input_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiModelOrderBy === 'output_tokens', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiModelSort('output_tokens')}
+									>{$i18n.t('Output tokens')}{#if apiModelOrderBy === 'output_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
 						</tr>
 					</thead>
 					<tbody>
 						{#each sortedApiModels as apiModel (apiModel.model_id ?? 'unattributed')}
 							<tr class="dark:border-gray-850">
-								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white">{$models.find((model) => model.id === apiModel.model_id)?.name || apiModel.model_id || $i18n.t('Unattributed')}</td>
+								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white"
+									>{$models.find((model) => model.id === apiModel.model_id)?.name ||
+										apiModel.model_id ||
+										$i18n.t('Unattributed')}</td
+								>
 								<td class="px-2.5 py-1 text-right">{apiModel.count.toLocaleString()}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiModel.input_tokens)}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiModel.output_tokens)}</td>
 							</tr>
 						{:else}
-							<tr><td colspan="4" class="px-3 py-2 text-center text-gray-400">{$i18n.t('No data')}</td></tr>
+							<tr
+								><td colspan="4" class="px-3 py-2 text-center text-gray-400"
+									>{$i18n.t('No data')}</td
+								></tr
+							>
 						{/each}
 					</tbody>
 				</table>
 			</div>
 		</div>
 		<div>
-			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">{$i18n.t('User Activity')}</div>
+			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">
+				{$i18n.t('User Activity')}
+			</div>
 			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
 				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400 table-auto">
 					<thead class="text-xs text-gray-800 uppercase dark:text-gray-200">
 						<tr class="border-b-[1.5px] border-gray-50 dark:border-gray-850/30">
-							<th scope="col" class="px-2.5 py-2" aria-sort={ariaSort(apiUserOrderBy === 'name', apiUserDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiUserSort('name')}>{$i18n.t('User')}{#if apiUserOrderBy === 'name'}<span aria-hidden="true"> {apiUserDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
-							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiUserOrderBy === 'count', apiUserDirection)}><button type="button" class="uppercase hover:underline" title={$i18n.t('HTTP requests')} on:click={() => toggleApiUserSort('count')}>{$i18n.t('Calls')}{#if apiUserOrderBy === 'count'}<span aria-hidden="true"> {apiUserDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
-							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiUserOrderBy === 'input_tokens', apiUserDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiUserSort('input_tokens')}>{$i18n.t('Input tokens')}{#if apiUserOrderBy === 'input_tokens'}<span aria-hidden="true"> {apiUserDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
-							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiUserOrderBy === 'output_tokens', apiUserDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiUserSort('output_tokens')}>{$i18n.t('Output tokens')}{#if apiUserOrderBy === 'output_tokens'}<span aria-hidden="true"> {apiUserDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
+							<th
+								scope="col"
+								class="px-2.5 py-2"
+								aria-sort={ariaSort(apiUserOrderBy === 'name', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiUserSort('name')}
+									>{$i18n.t('User')}{#if apiUserOrderBy === 'name'}<span aria-hidden="true">
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiUserOrderBy === 'count', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									title={$i18n.t('HTTP requests')}
+									on:click={() => toggleApiUserSort('count')}
+									>{$i18n.t('Calls')}{#if apiUserOrderBy === 'count'}<span aria-hidden="true">
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiUserOrderBy === 'input_tokens', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiUserSort('input_tokens')}
+									>{$i18n.t('Input tokens')}{#if apiUserOrderBy === 'input_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiUserOrderBy === 'output_tokens', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiUserSort('output_tokens')}
+									>{$i18n.t('Output tokens')}{#if apiUserOrderBy === 'output_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
 						</tr>
 					</thead>
 					<tbody>
 						{#each sortedApiUsers as apiUser (apiUser.user_id ?? 'unattributed')}
 							<tr class="dark:border-gray-850">
-								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white">{apiUser.name || apiUser.email || apiUser.user_id || $i18n.t('Unattributed')}</td>
+								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white"
+									>{apiUser.name || apiUser.email || apiUser.user_id || $i18n.t('Unattributed')}</td
+								>
 								<td class="px-2.5 py-1 text-right">{apiUser.count.toLocaleString()}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiUser.input_tokens)}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiUser.output_tokens)}</td>
 							</tr>
 						{:else}
-							<tr><td colspan="4" class="px-3 py-2 text-center text-gray-400">{$i18n.t('No data')}</td></tr>
+							<tr
+								><td colspan="4" class="px-3 py-2 text-center text-gray-400"
+									>{$i18n.t('No data')}</td
+								></tr
+							>
 						{/each}
 					</tbody>
 				</table>
@@ -555,18 +731,20 @@
 		</div>
 	</div>
 	<div class="text-gray-500 text-xs mt-1.5 text-right">
-		ⓘ {$i18n.t('Model calls count model completions for background requests; other rows, including Unattributed, count HTTP requests, so totals can differ from the header. Earlier records and requests without a model appear as Unattributed. Users show the top 50 for the selected sort.')}
+		ⓘ {$i18n.t(
+			'Model calls count model completions for background requests; other rows, including Unattributed, count HTTP requests, so totals can differ from the header. Earlier records and requests without a model appear as Unattributed. Users show the top 50 for the selected sort.'
+		)}
 	</div>
 {:else}
-<!-- Model Details Modal -->
-<AnalyticsModelModal
-	bind:show={showModelModal}
-	model={selectedModel}
-	startDate={getDateRange(selectedPeriod).start}
-	endDate={getDateRange(selectedPeriod).end}
-/>
+	<!-- Model Details Modal -->
+	<AnalyticsModelModal
+		bind:show={showModelModal}
+		model={selectedModel}
+		startDate={getDateRange(selectedPeriod).start}
+		endDate={getDateRange(selectedPeriod).end}
+	/>
 
-<!-- Summary stats -->
+	<!-- Summary stats -->
 	<div class="flex gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
 		<span
 			><span class="font-normal text-gray-900 dark:text-gray-300"

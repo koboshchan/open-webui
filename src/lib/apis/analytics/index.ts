@@ -5,7 +5,12 @@ const readError = async (res: Response) => {
 	try {
 		return JSON.parse(text);
 	} catch {
-		return { detail: text?.trim() ? `${res.status} ${res.statusText}: ${text.trim().slice(0, 200)}` : `${res.status} ${res.statusText}`, status: res.status };
+		return {
+			detail: text?.trim()
+				? `${res.status} ${res.statusText}: ${text.trim().slice(0, 200)}`
+				: `${res.status} ${res.statusText}`,
+			status: res.status
+		};
 	}
 };
 
@@ -42,7 +47,11 @@ export type APICallDashboard = {
 		total_tokens: number;
 		total_users: number;
 	};
-	timeline: { date: string; models: Record<string, number>; token_models: Record<string, number> }[];
+	timeline: {
+		date: string;
+		models: Record<string, number>;
+		token_models: Record<string, number>;
+	}[];
 	models: {
 		model_id: string | null;
 		count: number;
