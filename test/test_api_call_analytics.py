@@ -239,7 +239,7 @@ class AnalyticsRegression(unittest.IsolatedAsyncioTestCase):
 
     async def test_timezones_and_dst(self):
         await APICalls.record('POST', '/api/chat/completions', 200, 'u', 'm', 10, 4, created_at=1760004000)
-        for zone in ('UTC', 'America/Vancouver', 'Asia/Kolkata', 'Asia/Kathmandu'):
+        for zone in ('UTC', 'America/Vancouver', 'Asia/Kolkata', 'Asia/Kathmandu', 'Australia/Lord_Howe'):
             result = await APICalls.dashboard(
                 start_date=1760000400, end_date=1760007600, granularity='hourly', timezone=zone
             )

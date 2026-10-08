@@ -259,8 +259,12 @@ class APICalls:
                     # Iterate in UTC to retain both offset-separated hours at DST fallback.
                     if (last - first) // 3600 + 1 > 10000:
                         raise ValueError('Select a shorter date range (maximum 10000 hourly buckets)')
-                    for timestamp in range(first, last + 1, 3600):
+                    seen_hours = set()
+                    for timestamp in range(first, last + 1, math.gcd(3600, bucket_seconds)):
                         key = datetime.fromtimestamp(timestamp, tz).replace(minute=0).isoformat(timespec='minutes')
+                        if key in seen_hours:
+                            continue
+                        seen_hours.add(key)
                         timeline.append(
                             {'date': key, 'models': counts.get(key, {}), 'token_models': token_counts.get(key, {})}
                         )
