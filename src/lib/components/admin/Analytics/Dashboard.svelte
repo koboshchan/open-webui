@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
 	import { models } from '$lib/stores';
 	import {
 		getSummary,
@@ -21,10 +23,10 @@
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import { WEBUI_API_BASE_URL } from '$lib/constants';
 	import { formatNumber } from '$lib/utils';
-	import { goto } from '$app/navigation';
 	import type { Instance } from 'tippy.js';
+	import { toast } from 'svelte-sonner';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	// Time period - persist in localStorage
 	let selectedPeriod =
@@ -51,6 +53,17 @@
 		'90d': 'year',
 		all: 'all'
 	};
+	// Custom ranges pick a label format from their real length so long ranges show years.
+	const customChartPeriod = (start: string, end: string): 'week' | 'month' | 'year' => {
+		const days =
+			(new Date(end + 'T00:00:00').getTime() - new Date(start + 'T00:00:00').getTime()) / 86400000;
+		if (!Number.isFinite(days) || days <= 31) return 'week';
+		return days <= 90 ? 'month' : 'year';
+	};
+	$: chartPeriod =
+		selectedPeriod === 'custom'
+			? customChartPeriod(customStart, customEnd)
+			: chartPeriods[selectedPeriod] || 'week';
 
 	// User group filter
 	let groups: Array<{ id: string; name: string }> = [];
@@ -70,7 +83,9 @@
 				return { start: now - 90 * day, end: now };
 			case 'custom': {
 				// Date inputs are local calendar days, including days with a DST change.
-				const start = customStart ? Math.floor(new Date(`${customStart}T00:00:00`).getTime() / 1000) : null;
+				const start = customStart
+					? Math.floor(new Date(`${customStart}T00:00:00`).getTime() / 1000)
+					: null;
 				const endDay = customEnd ? new Date(`${customEnd}T00:00:00`) : null;
 				if (endDay) endDay.setDate(endDay.getDate() + 1);
 				const end = endDay ? Math.floor(endDay.getTime() / 1000) - 1 : null;
@@ -98,6 +113,14 @@
 	> = {};
 	let totalTokens = { input: 0, output: 0, total: 0 };
 	let apiCallCollectionEnabled = false;
+	// Which data the dashboard shows. Independent of whether new API calls are being collected.
+	const storedSource =
+		typeof localStorage !== 'undefined' ? localStorage.getItem('analyticsSource') : null;
+	let analyticsSource: 'api' | 'chat' | null =
+		storedSource === 'api' || storedSource === 'chat' ? storedSource : null;
+	let collectionRetrying = false;
+	$: if (analyticsSource && typeof localStorage !== 'undefined')
+		localStorage.setItem('analyticsSource', analyticsSource);
 	let collectionLoaded = false;
 	let collectionError = false;
 	let apiDashboard: APICallDashboard = {
@@ -127,7 +150,19 @@
 	let apiModelOrderBy: 'model_id' | 'count' | 'input_tokens' | 'output_tokens' = 'count';
 	let apiModelDirection: 'asc' | 'desc' = 'desc';
 	let apiModelGraphMetric: 'calls' | 'tokens' = 'tokens';
-	const apiChartColors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16'];
+	const apiChartColors = [
+		'#3b82f6',
+		'#10b981',
+		'#f59e0b',
+		'#ef4444',
+		'#8b5cf6',
+		'#ec4899',
+		'#06b6d4',
+		'#84cc16'
+	];
+
+	const ariaSort = (active: boolean, direction: 'asc' | 'desc') =>
+		active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none';
 
 	const toggleApiUserSort = (key: typeof apiUserOrderBy) => {
 		if (apiUserOrderBy === key) apiUserDirection = apiUserDirection === 'asc' ? 'desc' : 'asc';
@@ -170,14 +205,16 @@
 		try {
 			const { start, end } = getDateRange(selectedPeriod);
 			const granularity = selectedPeriod === '24h' ? 'hourly' : 'daily';
-			if (apiCallCollectionEnabled) {
+			if (analyticsSource === 'api') {
 				const result = await getAPICallDashboard(
 					localStorage.token,
 					start,
 					end,
 					selectedGroupId,
 					granularity,
-					Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+					Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+					apiUserOrderBy,
+					apiUserDirection
 				);
 				if (version === loadVersion) apiDashboard = result;
 				return;
@@ -231,24 +268,54 @@
 		try {
 			const result = await setAPICallCollection(localStorage.token, !apiCallCollectionEnabled);
 			apiCallCollectionEnabled = result.enabled;
-		} catch (err) {
+		} catch (err: unknown) {
 			console.error('Could not update API call collection:', err);
+			const detail = (err as { detail?: unknown } | null)?.detail;
+			toast.error(
+				typeof detail === 'string' ? detail : $i18n.t('Could not update API call collection')
+			);
+		} finally {
+			apiCallCollectionSaving = false;
 		}
-		apiCallCollectionSaving = false;
 	};
+
+	const reloadDeps = (...deps: unknown[]) => deps.length > 0;
 
 	// Reload when the period, group, or custom range changes.
 	// In custom mode, wait until both dates are set to avoid a half-specified query.
 	$: if (collectionLoaded && selectedPeriod === 'custom' && !(customStart && customEnd)) {
+		loadVersion++; // drop any in-flight result for the previous range
 		loading = false;
-	} else if (collectionLoaded && !collectionError && selectedPeriod) {
-		// reference customStart/customEnd so this block reruns when they change
-		customStart;
-		customEnd;
-		selectedGroupId;
-		apiCallCollectionEnabled;
+	} else if (
+		collectionLoaded &&
+		analyticsSource &&
+		selectedPeriod &&
+		// list these so the block reruns when any of them change
+		reloadDeps(customStart, customEnd, selectedGroupId, apiUserOrderBy, apiUserDirection)
+	) {
 		loadDashboard();
 	}
+
+	const applyCollectionResult = (result: PromiseSettledResult<{ enabled?: boolean } | null>) => {
+		if (result.status === 'fulfilled') {
+			collectionError = false;
+			apiCallCollectionEnabled = Boolean(result.value?.enabled);
+			if (!analyticsSource) analyticsSource = apiCallCollectionEnabled ? 'api' : 'chat';
+		} else {
+			collectionError = true;
+			if (!analyticsSource) analyticsSource = 'chat';
+			console.error('Failed to load API call collection setting:', result.reason);
+		}
+	};
+
+	// Reload only the collection setting; dashboards stay usable meanwhile.
+	const retryCollectionSetting = async () => {
+		collectionRetrying = true;
+		const [result] = await Promise.allSettled([getAPICallCollection(localStorage.token)]);
+		applyCollectionResult(result);
+		if (result.status === 'rejected') toast.error($i18n.t('Failed to load analytics settings'));
+		collectionRetrying = false;
+	};
 
 	onMount(async () => {
 		const [groupsResult, collectionResult] = await Promise.allSettled([
@@ -257,19 +324,15 @@
 		]);
 		if (groupsResult.status === 'fulfilled') groups = groupsResult.value ?? [];
 		else console.error('Failed to load groups:', groupsResult.reason);
-		if (collectionResult.status === 'fulfilled') {
-			apiCallCollectionEnabled = Boolean(collectionResult.value?.enabled);
-		} else {
-			collectionError = true;
-			console.error('Failed to load API call collection setting:', collectionResult.reason);
-		}
+		applyCollectionResult(collectionResult);
 		collectionLoaded = true;
 	});
 
 	$: sortedApiModels = [...apiDashboard.models].sort((a, b) => {
-		const compare = apiModelOrderBy === 'model_id'
-			? (a.model_id || '').localeCompare(b.model_id || '')
-			: a[apiModelOrderBy] - b[apiModelOrderBy];
+		const compare =
+			apiModelOrderBy === 'model_id'
+				? (a.model_id || '').localeCompare(b.model_id || '')
+				: a[apiModelOrderBy] - b[apiModelOrderBy];
 		return apiModelDirection === 'asc' ? compare : -compare;
 	});
 	$: apiChartData = apiDashboard.timeline.map((point) => ({
@@ -277,27 +340,14 @@
 		models: apiModelGraphMetric === 'tokens' ? point.token_models : point.models
 	}));
 	$: apiChartModels = [...apiDashboard.models]
-		.sort((a, b) => apiModelGraphMetric === 'tokens'
-			? b.total_tokens - a.total_tokens
-			: b.count - a.count)
+		.sort((a, b) =>
+			apiModelGraphMetric === 'tokens' ? b.total_tokens - a.total_tokens : b.count - a.count
+		)
 		.slice(0, 8)
 		.map((model) => model.model_id || 'Unattributed');
 
-	$: sortedApiUsers = [...apiDashboard.users].sort((a, b) => {
-		let compare: number;
-		if (apiUserOrderBy === 'name') {
-			compare = (a.name || a.email || a.user_id || '').localeCompare(
-				b.name || b.email || b.user_id || ''
-			);
-		} else if (apiUserOrderBy === 'input_tokens') {
-			compare = a.input_tokens - b.input_tokens;
-		} else if (apiUserOrderBy === 'output_tokens') {
-			compare = a.output_tokens - b.output_tokens;
-		} else {
-			compare = a.count - b.count;
-		}
-		return apiUserDirection === 'asc' ? compare : -compare;
-	});
+	// Users are ordered (and limited to the top 50) by the server.
+	$: sortedApiUsers = apiDashboard.users;
 
 	$: sortedModels = [...modelStats].sort((a, b) => {
 		if (modelOrderBy === 'name') {
@@ -394,6 +444,14 @@
 				<option value={period.value}>{period.label}</option>
 			{/each}
 		</select>
+		<select
+			bind:value={analyticsSource}
+			aria-label={$i18n.t('Analytics source')}
+			class="w-fit pr-8 rounded-sm px-2 text-xs bg-transparent outline-none text-right"
+		>
+			<option value="api">{$i18n.t('API calls')}</option>
+			<option value="chat">{$i18n.t('Chat messages')}</option>
+		</select>
 		<button
 			type="button"
 			on:click={toggleAPICallCollection}
@@ -407,19 +465,63 @@
 </div>
 
 {#if collectionError}
-	<div class="text-sm text-red-500 py-8 text-center">{$i18n.t('Failed to load analytics settings')}</div>
-{:else if !collectionLoaded || loading}
+	<div
+		role="alert"
+		class="flex items-center justify-between gap-2 text-xs text-red-500 px-0.5 pb-2"
+	>
+		<span>{$i18n.t('Failed to load analytics settings. Collection status is unknown.')}</span>
+		<button
+			type="button"
+			class="rounded px-2 py-1 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+			disabled={collectionRetrying}
+			on:click={retryCollectionSetting}>{$i18n.t('Retry')}</button
+		>
+	</div>
+{/if}
+
+{#if !collectionLoaded || loading}
 	<div class="my-10 flex justify-center"><Spinner className="size-5" /></div>
 {:else if dashboardError}
-	<div class="text-sm text-red-500 py-8 text-center">{$i18n.t('Failed to load analytics data')}</div>
+	<div class="text-sm text-red-500 py-8 text-center">
+		{$i18n.t('Failed to load analytics data')}
+	</div>
 {:else if selectedPeriod === 'custom' && !(customStart && customEnd)}
 	<div class="text-sm text-gray-400 py-8 text-center">{$i18n.t('Select a start and end date')}</div>
-{:else if apiCallCollectionEnabled}
+{:else if analyticsSource === 'api'}
+	{#if !apiCallCollectionEnabled && !collectionError}
+		<div class="text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
+			{$i18n.t('API call collection is off. Showing previously collected history.')}
+		</div>
+	{/if}
 	<div class="flex flex-wrap gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
-		<span><span class="text-gray-900 dark:text-gray-300">{apiDashboard.summary.total_calls.toLocaleString()}</span> {$i18n.t('API calls')}</span>
-		<span><span class="text-gray-900 dark:text-gray-300">{formatNumber(apiDashboard.summary.input_tokens)}</span> {$i18n.t('Input tokens')}</span>
-		<span><span class="text-gray-900 dark:text-gray-300">{formatNumber(apiDashboard.summary.output_tokens)}</span> {$i18n.t('Output tokens')}</span>
-		<span><span class="text-gray-900 dark:text-gray-300">{apiDashboard.summary.total_users.toLocaleString()}</span> {$i18n.t('users')}</span>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{apiDashboard.summary.total_calls.toLocaleString()}</span
+			>
+			<Tooltip
+				content={$i18n.t(
+					'HTTP requests recorded. One request can produce several model completions.'
+				)}>{$i18n.t('HTTP requests')}</Tooltip
+			></span
+		>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{formatNumber(apiDashboard.summary.input_tokens)}</span
+			>
+			{$i18n.t('Input tokens')}</span
+		>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{formatNumber(apiDashboard.summary.output_tokens)}</span
+			>
+			{$i18n.t('Output tokens')}</span
+		>
+		<span
+			><span class="text-gray-900 dark:text-gray-300"
+				>{apiDashboard.summary.total_users.toLocaleString()}</span
+			>
+			{$i18n.t('users')}</span
+		>
 	</div>
 
 	<div class="mb-4">
@@ -427,10 +529,21 @@
 			<div class="text-xs font-normal text-gray-600 dark:text-gray-400">
 				{selectedPeriod === '24h' ? $i18n.t('Hourly Model Usage') : $i18n.t('Daily Model Usage')}
 			</div>
-			<div class="flex gap-1 text-xs">
-				<button type="button" class:font-semibold={apiModelGraphMetric === 'tokens'} on:click={() => (apiModelGraphMetric = 'tokens')}>{$i18n.t('Tokens')}</button>
+			<div class="flex gap-1 text-xs" role="group" aria-label={$i18n.t('Chart metric')}>
+				<button
+					type="button"
+					aria-pressed={apiModelGraphMetric === 'tokens'}
+					class:font-semibold={apiModelGraphMetric === 'tokens'}
+					on:click={() => (apiModelGraphMetric = 'tokens')}>{$i18n.t('Tokens')}</button
+				>
 				<span class="text-gray-400">/</span>
-				<button type="button" class:font-semibold={apiModelGraphMetric === 'calls'} on:click={() => (apiModelGraphMetric = 'calls')}>{$i18n.t('Calls')}</button>
+				<button
+					type="button"
+					aria-pressed={apiModelGraphMetric === 'calls'}
+					class:font-semibold={apiModelGraphMetric === 'calls'}
+					on:click={() => (apiModelGraphMetric = 'calls')}
+					title={$i18n.t('Requests / completions')}>{$i18n.t('Calls')}</button
+				>
 			</div>
 		</div>
 		{#if apiDashboard.timeline.length > 1 && apiChartModels.length > 0}
@@ -439,7 +552,7 @@
 				models={apiChartModels}
 				colors={apiChartColors}
 				height={200}
-				period={chartPeriods[selectedPeriod] || 'week'}
+				period={chartPeriod}
 			/>
 		{:else}
 			<div class="py-10 text-center text-xs text-gray-400">{$i18n.t('No data')}</div>
@@ -448,54 +561,178 @@
 
 	<div class="grid md:grid-cols-2 gap-4">
 		<div>
-			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">{$i18n.t('Model Usage')}</div>
+			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">
+				{$i18n.t('Model Usage')}
+			</div>
 			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
 				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400 table-auto">
 					<thead class="text-xs text-gray-800 uppercase dark:text-gray-200">
 						<tr class="border-b-[1.5px] border-gray-50 dark:border-gray-850/30">
-							<th scope="col" class="px-2.5 py-2 cursor-pointer" on:click={() => toggleApiModelSort('model_id')}>{$i18n.t('Model')}</th>
-							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiModelSort('count')}>{$i18n.t('Calls')}</th>
-							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiModelSort('input_tokens')}>{$i18n.t('Input tokens')}</th>
-							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiModelSort('output_tokens')}>{$i18n.t('Output tokens')}</th>
+							<th
+								scope="col"
+								class="px-2.5 py-2"
+								aria-sort={ariaSort(apiModelOrderBy === 'model_id', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiModelSort('model_id')}
+									>{$i18n.t('Model')}{#if apiModelOrderBy === 'model_id'}<span aria-hidden="true">
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiModelOrderBy === 'count', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									title={$i18n.t('Requests / completions')}
+									on:click={() => toggleApiModelSort('count')}
+									>{$i18n.t('Calls')}{#if apiModelOrderBy === 'count'}<span aria-hidden="true">
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiModelOrderBy === 'input_tokens', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiModelSort('input_tokens')}
+									>{$i18n.t('Input tokens')}{#if apiModelOrderBy === 'input_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiModelOrderBy === 'output_tokens', apiModelDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiModelSort('output_tokens')}
+									>{$i18n.t('Output tokens')}{#if apiModelOrderBy === 'output_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiModelDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
 						</tr>
 					</thead>
 					<tbody>
 						{#each sortedApiModels as apiModel (apiModel.model_id ?? 'unattributed')}
 							<tr class="dark:border-gray-850">
-								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white">{$models.find((model) => model.id === apiModel.model_id)?.name || apiModel.model_id || $i18n.t('Unattributed')}</td>
+								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white"
+									>{$models.find((model) => model.id === apiModel.model_id)?.name ||
+										apiModel.model_id ||
+										$i18n.t('Unattributed')}</td
+								>
 								<td class="px-2.5 py-1 text-right">{apiModel.count.toLocaleString()}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiModel.input_tokens)}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiModel.output_tokens)}</td>
 							</tr>
 						{:else}
-							<tr><td colspan="4" class="px-3 py-2 text-center text-gray-400">{$i18n.t('No data')}</td></tr>
+							<tr
+								><td colspan="4" class="px-3 py-2 text-center text-gray-400"
+									>{$i18n.t('No data')}</td
+								></tr
+							>
 						{/each}
 					</tbody>
 				</table>
 			</div>
 		</div>
 		<div>
-			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">{$i18n.t('User Activity')}</div>
+			<div class="text-xs font-normal text-gray-700 dark:text-gray-300 mb-1 px-0.5">
+				{$i18n.t('User Activity')}
+			</div>
 			<div class="scrollbar-hidden relative whitespace-nowrap overflow-x-auto max-w-full">
 				<table class="w-full text-xs text-left text-gray-500 dark:text-gray-400 table-auto">
 					<thead class="text-xs text-gray-800 uppercase dark:text-gray-200">
 						<tr class="border-b-[1.5px] border-gray-50 dark:border-gray-850/30">
-							<th scope="col" class="px-2.5 py-2 cursor-pointer" on:click={() => toggleApiUserSort('name')}>{$i18n.t('User')}</th>
-							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiUserSort('count')}>{$i18n.t('Calls')}</th>
-							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiUserSort('input_tokens')}>{$i18n.t('Input tokens')}</th>
-							<th scope="col" class="px-2.5 py-2 text-right cursor-pointer" on:click={() => toggleApiUserSort('output_tokens')}>{$i18n.t('Output tokens')}</th>
+							<th
+								scope="col"
+								class="px-2.5 py-2"
+								aria-sort={ariaSort(apiUserOrderBy === 'name', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiUserSort('name')}
+									>{$i18n.t('User')}{#if apiUserOrderBy === 'name'}<span aria-hidden="true">
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiUserOrderBy === 'count', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									title={$i18n.t('HTTP requests')}
+									on:click={() => toggleApiUserSort('count')}
+									>{$i18n.t('Calls')}{#if apiUserOrderBy === 'count'}<span aria-hidden="true">
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiUserOrderBy === 'input_tokens', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiUserSort('input_tokens')}
+									>{$i18n.t('Input tokens')}{#if apiUserOrderBy === 'input_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
+							<th
+								scope="col"
+								class="px-2.5 py-2 text-right"
+								aria-sort={ariaSort(apiUserOrderBy === 'output_tokens', apiUserDirection)}
+								><button
+									type="button"
+									class="uppercase hover:underline"
+									on:click={() => toggleApiUserSort('output_tokens')}
+									>{$i18n.t('Output tokens')}{#if apiUserOrderBy === 'output_tokens'}<span
+											aria-hidden="true"
+										>
+											{apiUserDirection === 'asc' ? '▲' : '▼'}</span
+										>{/if}</button
+								></th
+							>
 						</tr>
 					</thead>
 					<tbody>
 						{#each sortedApiUsers as apiUser (apiUser.user_id ?? 'unattributed')}
 							<tr class="dark:border-gray-850">
-								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white">{apiUser.name || apiUser.email || apiUser.user_id || $i18n.t('Unattributed')}</td>
+								<td class="px-2.5 py-1 font-normal text-gray-900 dark:text-white"
+									>{apiUser.name || apiUser.email || apiUser.user_id || $i18n.t('Unattributed')}</td
+								>
 								<td class="px-2.5 py-1 text-right">{apiUser.count.toLocaleString()}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiUser.input_tokens)}</td>
 								<td class="px-2.5 py-1 text-right">{formatNumber(apiUser.output_tokens)}</td>
 							</tr>
 						{:else}
-							<tr><td colspan="4" class="px-3 py-2 text-center text-gray-400">{$i18n.t('No data')}</td></tr>
+							<tr
+								><td colspan="4" class="px-3 py-2 text-center text-gray-400"
+									>{$i18n.t('No data')}</td
+								></tr
+							>
 						{/each}
 					</tbody>
 				</table>
@@ -503,18 +740,20 @@
 		</div>
 	</div>
 	<div class="text-gray-500 text-xs mt-1.5 text-right">
-		ⓘ {$i18n.t('Earlier API records and requests without a model appear as Unattributed.')}
+		ⓘ {$i18n.t(
+			'Model calls count model completions for background requests; other rows, including Unattributed, count HTTP requests, so totals can differ from the header. Earlier records and requests without a model appear as Unattributed. Users show the top 50 for the selected sort.'
+		)}
 	</div>
 {:else}
-<!-- Model Details Modal -->
-<AnalyticsModelModal
-	bind:show={showModelModal}
-	model={selectedModel}
-	startDate={getDateRange(selectedPeriod).start}
-	endDate={getDateRange(selectedPeriod).end}
-/>
+	<!-- Model Details Modal -->
+	<AnalyticsModelModal
+		bind:show={showModelModal}
+		model={selectedModel}
+		startDate={getDateRange(selectedPeriod).start}
+		endDate={getDateRange(selectedPeriod).end}
+	/>
 
-<!-- Summary stats -->
+	<!-- Summary stats -->
 	<div class="flex gap-3 text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
 		<span
 			><span class="font-normal text-gray-900 dark:text-gray-300"
@@ -573,7 +812,6 @@
 			'#06b6d4',
 			'#84cc16'
 		]}
-		{@const periodMap = { '24h': 'hour', '7d': 'week', '30d': 'month', '90d': 'year', all: 'all' }}
 		<div class="mb-4">
 			<div class="text-xs font-normal text-gray-600 dark:text-gray-400 mb-2 px-0.5">
 				{selectedPeriod === '24h' ? $i18n.t('Hourly Messages') : $i18n.t('Daily Messages')}
@@ -583,7 +821,7 @@
 				models={topModels}
 				colors={chartColors}
 				height={200}
-				period={periodMap[selectedPeriod] || 'week'}
+				period={chartPeriod}
 			/>
 		</div>
 	{/if}
