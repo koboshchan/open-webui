@@ -107,10 +107,11 @@
 	let totalTokens = { input: 0, output: 0, total: 0 };
 	let apiCallCollectionEnabled = false;
 	// Which data the dashboard shows. Independent of whether new API calls are being collected.
+	const storedSource =
+		typeof localStorage !== 'undefined' ? localStorage.getItem('analyticsSource') : null;
 	let analyticsSource: 'api' | 'chat' | null =
-		(typeof localStorage !== 'undefined' &&
-			(localStorage.getItem('analyticsSource') as 'api' | 'chat' | null)) ||
-		null;
+		storedSource === 'api' || storedSource === 'chat' ? storedSource : null;
+	let collectionRetrying = false;
 	$: if (analyticsSource && typeof localStorage !== 'undefined')
 		localStorage.setItem('analyticsSource', analyticsSource);
 	let collectionLoaded = false;
@@ -267,7 +268,7 @@
 	$: if (collectionLoaded && selectedPeriod === 'custom' && !(customStart && customEnd)) {
 		loadVersion++; // drop any in-flight result for the previous range
 		loading = false;
-	} else if (collectionLoaded && !collectionError && selectedPeriod) {
+	} else if (collectionLoaded && analyticsSource && selectedPeriod) {
 		// reference customStart/customEnd so this block reruns when they change
 		customStart;
 		customEnd;
@@ -278,6 +279,27 @@
 		loadDashboard();
 	}
 
+	const applyCollectionResult = (result: PromiseSettledResult<any>) => {
+		if (result.status === 'fulfilled') {
+			collectionError = false;
+			apiCallCollectionEnabled = Boolean(result.value?.enabled);
+			if (!analyticsSource) analyticsSource = apiCallCollectionEnabled ? 'api' : 'chat';
+		} else {
+			collectionError = true;
+			if (!analyticsSource) analyticsSource = 'chat';
+			console.error('Failed to load API call collection setting:', result.reason);
+		}
+	};
+
+	// Reload only the collection setting; dashboards stay usable meanwhile.
+	const retryCollectionSetting = async () => {
+		collectionRetrying = true;
+		const [result] = await Promise.allSettled([getAPICallCollection(localStorage.token)]);
+		applyCollectionResult(result);
+		if (result.status === 'rejected') toast.error($i18n.t('Failed to load analytics settings'));
+		collectionRetrying = false;
+	};
+
 	onMount(async () => {
 		const [groupsResult, collectionResult] = await Promise.allSettled([
 			getGroups(localStorage.token),
@@ -285,14 +307,7 @@
 		]);
 		if (groupsResult.status === 'fulfilled') groups = groupsResult.value ?? [];
 		else console.error('Failed to load groups:', groupsResult.reason);
-		if (collectionResult.status === 'fulfilled') {
-			apiCallCollectionEnabled = Boolean(collectionResult.value?.enabled);
-			if (!analyticsSource) analyticsSource = apiCallCollectionEnabled ? 'api' : 'chat';
-		} else {
-			collectionError = true;
-			console.error('Failed to load API call collection setting:', collectionResult.reason);
-			toast.error($i18n.t('Failed to load analytics settings'));
-		}
+		applyCollectionResult(collectionResult);
 		collectionLoaded = true;
 	});
 
@@ -426,15 +441,28 @@
 </div>
 
 {#if collectionError}
-	<div class="text-sm text-red-500 py-8 text-center">{$i18n.t('Failed to load analytics settings')}</div>
-{:else if !collectionLoaded || loading}
+	<div
+		role="alert"
+		class="flex items-center justify-between gap-2 text-xs text-red-500 px-0.5 pb-2"
+	>
+		<span>{$i18n.t('Failed to load analytics settings. Collection status is unknown.')}</span>
+		<button
+			type="button"
+			class="rounded px-2 py-1 border border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+			disabled={collectionRetrying}
+			on:click={retryCollectionSetting}>{$i18n.t('Retry')}</button
+		>
+	</div>
+{/if}
+
+{#if !collectionLoaded || loading}
 	<div class="my-10 flex justify-center"><Spinner className="size-5" /></div>
 {:else if dashboardError}
 	<div class="text-sm text-red-500 py-8 text-center">{$i18n.t('Failed to load analytics data')}</div>
 {:else if selectedPeriod === 'custom' && !(customStart && customEnd)}
 	<div class="text-sm text-gray-400 py-8 text-center">{$i18n.t('Select a start and end date')}</div>
 {:else if analyticsSource === 'api'}
-	{#if !apiCallCollectionEnabled}
+	{#if !apiCallCollectionEnabled && !collectionError}
 		<div class="text-xs text-gray-500 dark:text-gray-400 px-0.5 pb-2">
 			{$i18n.t('API call collection is off. Showing previously collected history.')}
 		</div>
@@ -454,7 +482,7 @@
 			<div class="flex gap-1 text-xs" role="group" aria-label={$i18n.t('Chart metric')}>
 				<button type="button" aria-pressed={apiModelGraphMetric === 'tokens'} class:font-semibold={apiModelGraphMetric === 'tokens'} on:click={() => (apiModelGraphMetric = 'tokens')}>{$i18n.t('Tokens')}</button>
 				<span class="text-gray-400">/</span>
-				<button type="button" aria-pressed={apiModelGraphMetric === 'calls'} class:font-semibold={apiModelGraphMetric === 'calls'} on:click={() => (apiModelGraphMetric = 'calls')} title={$i18n.t('Model completions, not HTTP requests')}>{$i18n.t('Calls')}</button>
+				<button type="button" aria-pressed={apiModelGraphMetric === 'calls'} class:font-semibold={apiModelGraphMetric === 'calls'} on:click={() => (apiModelGraphMetric = 'calls')} title={$i18n.t('Requests / completions')}>{$i18n.t('Calls')}</button>
 			</div>
 		</div>
 		{#if apiDashboard.timeline.length > 1 && apiChartModels.length > 0}
@@ -478,7 +506,7 @@
 					<thead class="text-xs text-gray-800 uppercase dark:text-gray-200">
 						<tr class="border-b-[1.5px] border-gray-50 dark:border-gray-850/30">
 							<th scope="col" class="px-2.5 py-2" aria-sort={ariaSort(apiModelOrderBy === 'model_id', apiModelDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiModelSort('model_id')}>{$i18n.t('Model')}{#if apiModelOrderBy === 'model_id'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
-							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiModelOrderBy === 'count', apiModelDirection)}><button type="button" class="uppercase hover:underline" title={$i18n.t('Model completions, not HTTP requests')} on:click={() => toggleApiModelSort('count')}>{$i18n.t('Calls')}{#if apiModelOrderBy === 'count'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
+							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiModelOrderBy === 'count', apiModelDirection)}><button type="button" class="uppercase hover:underline" title={$i18n.t('Requests / completions')} on:click={() => toggleApiModelSort('count')}>{$i18n.t('Calls')}{#if apiModelOrderBy === 'count'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
 							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiModelOrderBy === 'input_tokens', apiModelDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiModelSort('input_tokens')}>{$i18n.t('Input tokens')}{#if apiModelOrderBy === 'input_tokens'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
 							<th scope="col" class="px-2.5 py-2 text-right" aria-sort={ariaSort(apiModelOrderBy === 'output_tokens', apiModelDirection)}><button type="button" class="uppercase hover:underline" on:click={() => toggleApiModelSort('output_tokens')}>{$i18n.t('Output tokens')}{#if apiModelOrderBy === 'output_tokens'}<span aria-hidden="true"> {apiModelDirection === 'asc' ? '▲' : '▼'}</span>{/if}</button></th>
 						</tr>
@@ -527,7 +555,7 @@
 		</div>
 	</div>
 	<div class="text-gray-500 text-xs mt-1.5 text-right">
-		ⓘ {$i18n.t('Model calls count completions; one HTTP request can fan out to several models. Earlier records and requests without a model appear as Unattributed. Users show the top 50 for the selected sort.')}
+		ⓘ {$i18n.t('Model calls count model completions for background requests; other rows, including Unattributed, count HTTP requests, so totals can differ from the header. Earlier records and requests without a model appear as Unattributed. Users show the top 50 for the selected sort.')}
 	</div>
 {:else}
 <!-- Model Details Modal -->
