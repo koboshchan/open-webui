@@ -3,14 +3,13 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from open_webui.internal.db import get_async_session
 from open_webui.models.chat_messages import ChatMessageModel, ChatMessages
 from open_webui.models.api_calls import APICalls
 from open_webui.models.config import Config
 from open_webui.models.chats import Chats
 from open_webui.models.feedbacks import Feedbacks
-from open_webui.models.groups import Groups
 from open_webui.models.users import Users
 from open_webui.utils.auth import get_admin_user
 from open_webui.utils.api_call_analytics import invalidate_collection_cache
@@ -42,33 +41,48 @@ async def set_api_call_collection(form_data: APICallCollectionForm, user=Depends
 
 @router.get('/api-calls/summary')
 async def get_api_call_summary(
-    start_date: Optional[int] = Query(None),
-    end_date: Optional[int] = Query(None),
+    start_date: Optional[int] = Query(None, ge=0, le=253402214400),
+    end_date: Optional[int] = Query(None, ge=0, le=253402214400),
     group_id: Optional[str] = Query(None),
     user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ):
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(400, 'Start date must be before end date')
     return await APICalls.summary(start_date=start_date, end_date=end_date, group_id=group_id, db=db)
 
 
 @router.get('/api-calls/dashboard')
 async def get_api_call_dashboard(
-    start_date: Optional[int] = Query(None),
-    end_date: Optional[int] = Query(None),
+    start_date: Optional[int] = Query(None, ge=0, le=253402214400),
+    end_date: Optional[int] = Query(None, ge=0, le=253402214400),
     group_id: Optional[str] = Query(None),
     granularity: Literal['hourly', 'daily'] = Query('daily'),
     timezone: str = Query('UTC'),
+    user_order_by: Literal['count', 'name', 'input_tokens', 'output_tokens'] = Query('count'),
+    user_direction: Literal['asc', 'desc'] = Query('desc'),
     user=Depends(get_admin_user),
     db: AsyncSession = Depends(get_async_session),
 ):
-    return await APICalls.dashboard(
-        start_date=start_date,
-        end_date=end_date,
-        group_id=group_id,
-        granularity=granularity,
-        timezone=timezone,
-        db=db,
-    )
+    if start_date is not None and end_date is not None:
+        if start_date > end_date:
+            raise HTTPException(400, 'Start date must be before end date')
+        width = 3600 if granularity == 'hourly' else 86400
+        if (end_date - start_date) // width + 2 > 10000:
+            raise HTTPException(400, 'Select a shorter date range (maximum 10000 buckets)')
+    try:
+        return await APICalls.dashboard(
+            start_date=start_date,
+            end_date=end_date,
+            group_id=group_id,
+            granularity=granularity,
+            timezone=timezone,
+            user_order_by=user_order_by,
+            user_direction=user_direction,
+            db=db,
+        )
+    except (ValueError, OverflowError, OSError) as error:
+        raise HTTPException(400, str(error)) from error
 
 
 ####################
