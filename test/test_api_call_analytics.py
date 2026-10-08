@@ -245,6 +245,20 @@ class AnalyticsRegression(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(sum(sum(bucket['token_models'].values()) for bucket in result['timeline']), 14, zone)
         await clear()
+        from zoneinfo import ZoneInfo
+
+        start = int(datetime(2025, 4, 6, 0, 0, tzinfo=ZoneInfo('Australia/Lord_Howe')).timestamp())
+        end = int(datetime(2025, 4, 6, 4, 0, tzinfo=ZoneInfo('Australia/Lord_Howe')).timestamp())
+        for timestamp in range(start, end + 1, 1800):
+            await APICalls.record('POST', '/api/chat/completions', 200, 'u', 'm', 10, 4, created_at=timestamp)
+        result = await APICalls.dashboard(
+            start_date=start, end_date=end, granularity='hourly', timezone='Australia/Lord_Howe'
+        )
+        self.assertEqual(
+            sum(sum(bucket['token_models'].values()) for bucket in result['timeline']),
+            result['summary']['total_tokens'],
+        )
+        await clear()
         for timestamp in (1762070400, 1762074000):
             await APICalls.record('POST', '/api/chat/completions', 200, 'u', 'm', 10, 4, created_at=timestamp)
         result = await APICalls.dashboard(
