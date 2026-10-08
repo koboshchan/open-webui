@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { onMount, getContext } from 'svelte';
+	import type { Writable } from 'svelte/store';
+	import type { i18n as i18nType } from 'i18next';
 	import { models } from '$lib/stores';
 	import {
 		getSummary,
@@ -23,7 +25,7 @@
 	import { formatNumber } from '$lib/utils';
 	import { toast } from 'svelte-sonner';
 
-	const i18n = getContext('i18n');
+	const i18n = getContext<Writable<i18nType>>('i18n');
 
 	// Time period - persist in localStorage
 	let selectedPeriod =
