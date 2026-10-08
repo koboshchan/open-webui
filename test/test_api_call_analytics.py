@@ -193,6 +193,50 @@ class AnalyticsRegression(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(row['count'] for row in result['models']), 2)
         self.assertEqual(result['summary']['total_tokens'], 28)
 
+    async def test_actual_nonstream_hook_for_temporary_chat(self):
+        import ast
+
+        # Execute the real completion handler with unrelated UI/persistence helpers stubbed.
+        tree = ast.parse((ROOT / 'open_webui/utils/middleware.py').read_text())
+        handler = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == 'non_streaming_chat_response_handler'
+        )
+        namespace = {
+            'get_response_data': lambda response: (response, response),
+            'normalize_usage': lambda usage: usage,
+            'record_async_model_usage': record_async_model_usage,
+            'is_saved_chat_id': lambda chat: not chat.startswith(('temporary:', 'channel:', 'local:')),
+            'ENABLE_API_OUTLET_FILTERS': False,
+            'merge_events_into_response': lambda response, events: response,
+        }
+        exec(compile(ast.Module(body=[handler], type_ignores=[]), 'actual_completion_handler', 'exec'), namespace)
+        for chat_id in ('temporary:abc', 'channel:abc', 'local:abc'):
+            await clear()
+            request = Request(
+                {
+                    'type': 'http',
+                    'state': {
+                        'api_call_analytics_id': 'temporary-call',
+                        'api_call_analytics_async': True,
+                        'api_call_analytics_created_at': 1760004000,
+                    },
+                }
+            )
+            response = {'usage': {'input_tokens': 10, 'output_tokens': 4}}
+            ctx = {
+                'request': request,
+                'user': types.SimpleNamespace(id='u'),
+                'metadata': {'chat_id': chat_id},
+                'events': [],
+                'event_emitter': None,
+                'form_data': {'model': 'm'},
+            }
+            result = await namespace['non_streaming_chat_response_handler'](response, ctx)
+            self.assertEqual(result, response)
+            self.assertEqual((await APICalls.summary())['total_tokens'], 14, chat_id)
+
     async def test_timezones_and_dst(self):
         await APICalls.record('POST', '/api/chat/completions', 200, 'u', 'm', 10, 4, created_at=1760004000)
         for zone in ('UTC', 'America/Vancouver', 'Asia/Kolkata', 'Asia/Kathmandu'):
